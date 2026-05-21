@@ -13,7 +13,7 @@
 // ============================================================================
 
 const API = 'https://optcgapi.com/api';
-const CACHE_KEY = 'optcg:catalog:v5';
+const CACHE_KEY = 'optcg:catalog:v6';
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24h
 const HISTORY_PREFIX = 'optcg:history:';
 const HISTORY_TTL_MS = 6 * 60 * 60 * 1000; // 6h
@@ -143,12 +143,14 @@ const revalidateCatalog = async () => {
       ...dons.map(c => normalize(c, 'don')),
     ].filter(c => c.id);
 
-    // De-dupe — id is now unique per physical variant (promos with shared
-    // base card_set_id get disambiguated via variantTag in normalize()), so
-    // collisions here only happen when the same card appears in two endpoints.
+    // De-dupe by imageId, which is unique per physical printing — sets and
+    // starters use card_image_id (e.g. "OP01-016_p1" for the parallel of
+    // OP01-016), and promos without a card_image_id fall back to our
+    // disambiguated id (with the variant tag baked in via normalize()).
+    // Using c.id alone collapses parallels into their base printings.
     const byKey = new Map();
     for (const c of cards) {
-      const key = c.id;
+      const key = c.imageId || c.id;
       const existing = byKey.get(key);
       if (!existing || (c.marketPrice && !existing.marketPrice)) byKey.set(key, c);
     }
