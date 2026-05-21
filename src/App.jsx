@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useReducer } from 'react';
-import { Search, Plus, X, TrendingUp, TrendingDown, Folder, Trash2, DollarSign, Anchor, ChevronRight, Package, BarChart3, RefreshCw, Cloud, HardDrive, ImageOff, Award, Loader2 } from 'lucide-react';
+import { Search, Plus, X, TrendingUp, TrendingDown, Folder, Trash2, DollarSign, Anchor, ChevronRight, Package, BarChart3, RefreshCw, Cloud, HardDrive, ImageOff, Award, Loader2, Pencil } from 'lucide-react';
 import { store, MODE, VAULT_LABEL } from './storage.js';
 import { loadCatalog, loadPriceHistory, groupBySet, compareSets } from './catalog.js';
 import {
@@ -92,6 +92,7 @@ export default function App() {
   const [activeCollectionId, setActiveCollectionId] = useState(null);
   const [detailCard, setDetailCard] = useState(null);
   const [addingCard, setAddingCard] = useState(null);
+  const [editingEntry, setEditingEntry] = useState(null);
 
   // Load card catalog
   useEffect(() => {
@@ -220,7 +221,12 @@ export default function App() {
             onSearchClick={() => setView('search')}
             onCardClick={(card) => setDetailCard(card)}
             onRemoveEntry={removeEntry}
-            onEditEntry={updateEntry}
+            onEditEntry={(entry) => {
+              const card = catalogIndex.get(entry.card_id);
+              if (!card) return;
+              setAddingCard(card);
+              setEditingEntry(entry);
+            }}
           />
         )}
         {view === 'search' && (
@@ -243,10 +249,20 @@ export default function App() {
       {addingCard && (
         <AddCardModal
           card={addingCard}
+          entry={editingEntry}
           collections={collections}
           activeCollectionId={activeCollectionId}
-          onClose={() => setAddingCard(null)}
-          onSave={async (entry) => { await addEntry(entry); setAddingCard(null); }}
+          onClose={() => { setAddingCard(null); setEditingEntry(null); }}
+          onSave={async (payload) => {
+            if (editingEntry) {
+              const { id, ...patch } = payload;
+              await updateEntry(id, patch);
+            } else {
+              await addEntry(payload);
+            }
+            setAddingCard(null);
+            setEditingEntry(null);
+          }}
         />
       )}
 
@@ -355,7 +371,7 @@ function ModeIndicator() {
 }
 
 // ============================================================================
-function CollectionView({ collection, entries, catalogIndex, onSearchClick, onCardClick, onRemoveEntry, onEditEntry }) {
+function CollectionView({ collection, entries, catalogIndex, onSearchClick, onCardClick, onRemoveEntry, onEditEntry = () => {} }) {
   const stats = useMemo(() => {
     let totalPaid = 0, totalMarket = 0, gradedCount = 0;
     for (const e of entries) {
@@ -434,6 +450,7 @@ function CollectionView({ collection, entries, catalogIndex, onSearchClick, onCa
                   delta={delta}
                   onClick={() => onCardClick(card)}
                   onRemove={() => onRemoveEntry(entry.id)}
+                  onEdit={() => onEditEntry(entry)}
                 />
               );
             })}
@@ -608,7 +625,7 @@ function Stat({ label, value, sub, tone, accent }) {
   );
 }
 
-function EntryRow({ entry, card, marketValue, delta, onClick, onRemove }) {
+function EntryRow({ entry, card, marketValue, delta, onClick, onRemove, onEdit }) {
   const isGraded = Boolean(entry.grading_company);
   return (
     <div className="op-entry">
@@ -640,6 +657,9 @@ function EntryRow({ entry, card, marketValue, delta, onClick, onRemove }) {
           {delta >= 0 ? <TrendingUp size={14} /> : <TrendingDown size={14} />}
           {delta >= 0 ? '+' : ''}${delta.toFixed(2)}
         </div>
+      </button>
+      <button className="op-entry-remove" onClick={onEdit} title="Edit entry">
+        <Pencil size={14} />
       </button>
       <button className="op-entry-remove" onClick={onRemove} title="Remove from collection">
         <X size={15} />
@@ -1144,24 +1164,27 @@ function FilterGroup({ label, value, onChange, options, mode, compact }) {
 }
 
 // ============================================================================
-function AddCardModal({ card, collections, activeCollectionId, onClose, onSave }) {
-  const [collectionId, setCollectionId] = useState(activeCollectionId);
-  const [condition, setCondition] = useState('Near Mint');
-  const [purchasePrice, setPurchasePrice] = useState('');
-  const [contributions, setContributions] = useState([]);
-  const [notes, setNotes] = useState('');
+function AddCardModal({ card, entry, collections, activeCollectionId, onClose, onSave }) {
+  const editing = Boolean(entry);
+  const [collectionId, setCollectionId] = useState(entry?.collection_id || activeCollectionId);
+  const [condition, setCondition] = useState(entry?.condition || 'Near Mint');
+  const [purchasePrice, setPurchasePrice] = useState(entry ? String(entry.purchase_price ?? '') : '');
+  const [contributions, setContributions] = useState(
+    entry?.contributions ? entry.contributions.map(c => ({ name: c.name, amount: String(c.amount) })) : []
+  );
+  const [notes, setNotes] = useState(entry?.notes || '');
   const [saving, setSaving] = useState(false);
 
-  const [acquiredAt, setAcquiredAt] = useState(new Date().toISOString().slice(0, 10));
+  const [acquiredAt, setAcquiredAt] = useState(entry?.acquired_at || new Date().toISOString().slice(0, 10));
 
-  const [isGraded, setIsGraded] = useState(false);
-  const [gradingCompany, setGradingCompany] = useState('PSA');
-  const [grade, setGrade] = useState(10);
-  const [certNumber, setCertNumber] = useState('');
-  const [gradedPrice, setGradedPrice] = useState('');
-  const [pcProductId, setPcProductId] = useState('');
-  const [pcProductName, setPcProductName] = useState('');
-  const [priceFetchedAt, setPriceFetchedAt] = useState('');
+  const [isGraded, setIsGraded] = useState(Boolean(entry?.grading_company));
+  const [gradingCompany, setGradingCompany] = useState(entry?.grading_company || 'PSA');
+  const [grade, setGrade] = useState(entry?.grade ?? 10);
+  const [certNumber, setCertNumber] = useState(entry?.cert_number || '');
+  const [gradedPrice, setGradedPrice] = useState(entry?.graded_price ? String(entry.graded_price) : '');
+  const [pcProductId, setPcProductId] = useState(entry?.pc_product_id || '');
+  const [pcProductName, setPcProductName] = useState(entry?.pc_product_name || '');
+  const [priceFetchedAt, setPriceFetchedAt] = useState(entry?.price_fetched_at || '');
   const [fetchingPrice, setFetchingPrice] = useState(false);
   const [priceFetchError, setPriceFetchError] = useState('');
 
@@ -1246,7 +1269,7 @@ function AddCardModal({ card, collections, activeCollectionId, onClose, onSave }
   const handleSave = async () => {
     setSaving(true);
     if (isGraded && selectedVariant) savePick(card.id, selectedVariant);
-    const entry = {
+    const payload = {
       card_id: card.id,
       collection_id: collectionId,
       condition,
@@ -1263,7 +1286,8 @@ function AddCardModal({ card, collections, activeCollectionId, onClose, onSave }
       price_source: isGraded && pcProductId ? 'pricecharting' : '',
       price_fetched_at: isGraded ? priceFetchedAt : '',
     };
-    await onSave(entry);
+    if (editing) payload.id = entry.id;
+    await onSave(payload);
     setSaving(false);
   };
 
@@ -1276,7 +1300,7 @@ function AddCardModal({ card, collections, activeCollectionId, onClose, onSave }
             <CardArt card={card} />
           </div>
           <div>
-            <div className="op-eyebrow">Logging acquisition</div>
+            <div className="op-eyebrow">{editing ? 'Editing entry' : 'Logging acquisition'}</div>
             <div className="op-modal-title">
               {card.name}
               <VariantPill variant={card.variant} />
@@ -1469,7 +1493,7 @@ function AddCardModal({ card, collections, activeCollectionId, onClose, onSave }
           <div className="op-form-actions">
             <button className="op-btn-ghost" onClick={onClose} disabled={saving}>Cancel</button>
             <button className="op-btn-primary" onClick={handleSave} disabled={saving}>
-              {saving ? 'Saving…' : 'Save to Collection'}
+              {saving ? 'Saving…' : (editing ? 'Save changes' : 'Save to Collection')}
             </button>
           </div>
         </div>

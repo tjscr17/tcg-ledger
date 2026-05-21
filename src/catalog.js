@@ -13,7 +13,7 @@
 // ============================================================================
 
 const API = 'https://optcgapi.com/api';
-const CACHE_KEY = 'optcg:catalog:v6';
+const CACHE_KEY = 'optcg:catalog:v7';
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24h
 const HISTORY_PREFIX = 'optcg:history:';
 const HISTORY_TTL_MS = 6 * 60 * 60 * 1000; // 6h
@@ -53,7 +53,12 @@ const normalize = (raw, sourceType) => {
   // Only promos carry a meaningful variant suffix; sets/starters/Dons keep their parens intact
   const variant = sourceType === 'promo' ? extractParen(raw.card_name) : null;
   const tag = variant ? slugify(variant) : '';
-  const id = tag ? `${baseId}__${tag}` : baseId;
+  // id must be unique per physical printing — for sets/starters a parallel
+  // (e.g. ST29-014 base vs ST29-014_p1) shares card_set_id but has a unique
+  // card_image_id, so prefer that when no variant tag was derived.
+  const id = tag
+    ? `${baseId}__${tag}`
+    : (raw.card_image_id || baseId);
   const rawName = raw.card_name || '';
   const cleanedName = variant
     ? rawName.replace(/\s*\([^)]+\)\s*$/, '').trim()
