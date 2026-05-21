@@ -1284,7 +1284,7 @@ function AddCardModal({ card, entry, collections, activeCollectionId, onClose, o
       pc_product_id: isGraded ? pcProductId : '',
       pc_product_name: isGraded ? pcProductName : '',
       price_source: isGraded && pcProductId ? 'pricecharting' : '',
-      price_fetched_at: isGraded ? priceFetchedAt : '',
+      price_fetched_at: isGraded && priceFetchedAt ? priceFetchedAt : null,
     };
     if (editing) payload.id = entry.id;
     await onSave(payload);
