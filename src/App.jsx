@@ -862,6 +862,45 @@ function SearchView({ catalog, onAddCard, onCardClick }) {
   const [filterValue, setFilterValue] = useState('all');
   const [sortBy, setSortBy] = useState('set'); // 'set' | 'name' | 'price-desc' | 'price-asc'
   const [priceTier, setPriceTier] = useState('raw');
+  // Hide filter: per-dimension Sets so multiple hides apply at once. `hideDim`
+  // controls which dimension's pills are visible — the other dimensions stay
+  // active in the background.
+  const [hideDim, setHideDim] = useState('none'); // 'none' | 'rarity' | 'color' | 'type'
+  const [hiddenByDim, setHiddenByDim] = useState({ rarity: new Set(), color: new Set(), type: new Set() });
+
+  const currentHidden = hideDim !== 'none' ? hiddenByDim[hideDim] : null;
+  const totalHidden = hiddenByDim.rarity.size + hiddenByDim.color.size + hiddenByDim.type.size;
+
+  const toggleHiddenValue = (val) => {
+    if (hideDim === 'none') return;
+    setHiddenByDim(prev => {
+      const next = new Set(prev[hideDim]);
+      if (next.has(val)) next.delete(val); else next.add(val);
+      return { ...prev, [hideDim]: next };
+    });
+  };
+  const clearCurrentDim = () => {
+    if (hideDim === 'none') return;
+    setHiddenByDim(prev => ({ ...prev, [hideDim]: new Set() }));
+  };
+  const clearAllHides = () => setHiddenByDim({ rarity: new Set(), color: new Set(), type: new Set() });
+
+  // Pills for the active hide dimension. Rarity & color are fixed lists; type
+  // is derived from the catalog so we cover every card_type the API returns.
+  const hideValueOptions = useMemo(() => {
+    if (hideDim === 'rarity') {
+      return ['L','SR','SEC','R','UC','C','P','SP','TR'].map(v => ({ v, l: RARITY_LABELS[v] || v }));
+    }
+    if (hideDim === 'color') {
+      return ['Red','Blue','Green','Yellow','Purple','Black','Multicolor'].map(v => ({ v, l: v }));
+    }
+    if (hideDim === 'type') {
+      const seen = new Set();
+      for (const c of catalog) if (c.type) seen.add(c.type);
+      return [...seen].sort().map(v => ({ v, l: v }));
+    }
+    return [];
+  }, [hideDim, catalog]);
 
   // All distinct sets, sorted
   const sets = useMemo(() => {
@@ -878,6 +917,9 @@ function SearchView({ catalog, onAddCard, onCardClick }) {
     const fieldByDim = { rarity: 'rarity', color: 'color' };
     const activeField = fieldByDim[filterDim];
     return catalog.filter(c => {
+      if (hiddenByDim.rarity.has(c.rarity)) return false;
+      if (hiddenByDim.color.has(c.color)) return false;
+      if (hiddenByDim.type.has(c.type)) return false;
       if (setFilter !== 'all' && c.setId !== setFilter) return false;
       if (activeField && filterValue !== 'all' && c[activeField] !== filterValue) return false;
       if (!needle) return true;
@@ -889,7 +931,7 @@ function SearchView({ catalog, onAddCard, onCardClick }) {
         (c.setName || '').toLowerCase().includes(needle) ||
         (c.text || '').toLowerCase().includes(needle);
     });
-  }, [catalog, q, setFilter, filterDim, filterValue]);
+  }, [catalog, q, setFilter, filterDim, filterValue, hiddenByDim]);
 
   // Values for the secondary cascade dropdown.
   const filterValueOptions = useMemo(() => {
@@ -988,13 +1030,43 @@ function SearchView({ catalog, onAddCard, onCardClick }) {
           { v: 'price-desc', l: 'Price ↓' },
           { v: 'price-asc', l: 'Price ↑' },
         ]} />
+
+        <FilterGroup label={`Hide by${totalHidden > 0 ? ` (${totalHidden})` : ''}`} value={hideDim} onChange={setHideDim} mode="select" options={[
+          { v: 'none', l: 'Nothing hidden' },
+          { v: 'rarity', l: `Rarity${hiddenByDim.rarity.size > 0 ? ` · ${hiddenByDim.rarity.size}` : ''}` },
+          { v: 'color', l: `Color${hiddenByDim.color.size > 0 ? ` · ${hiddenByDim.color.size}` : ''}` },
+          { v: 'type', l: `Card type${hiddenByDim.type.size > 0 ? ` · ${hiddenByDim.type.size}` : ''}` },
+        ]} />
+
+        {hideDim !== 'none' && (
+          <div className="op-filter-group">
+            <div className="op-filter-label">
+              {`Hide ${hideDim}${currentHidden && currentHidden.size > 0 ? ` (${currentHidden.size})` : ''}`}
+              {currentHidden && currentHidden.size > 0 && (
+                <button className="op-clear-filters" style={{ marginLeft: 8 }} onClick={clearCurrentDim}>clear</button>
+              )}
+            </div>
+            <div className="op-filter-pills">
+              {hideValueOptions.map(o => (
+                <button
+                  key={o.v}
+                  className={`op-filter-pill is-compact ${currentHidden && currentHidden.has(o.v) ? 'is-active' : ''}`}
+                  onClick={() => toggleHiddenValue(o.v)}
+                  title={`Hide ${o.l}`}
+                >
+                  {o.l}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
 
       <div className="op-results-count">
         {sorted.length.toLocaleString()} {sorted.length === 1 ? 'result' : 'results'}
-        {(q || setFilter !== 'all' || (filterDim !== 'none' && filterValue !== 'all')) && (
+        {(q || setFilter !== 'all' || totalHidden > 0 || (filterDim !== 'none' && filterValue !== 'all')) && (
           <button className="op-clear-filters" onClick={() => {
-            setQ(''); setSetFilter('all'); setFilterDim('none'); setFilterValue('all');
+            setQ(''); setSetFilter('all'); setFilterDim('none'); setFilterValue('all'); setHideDim('none'); clearAllHides();
           }}>Clear filters</button>
         )}
       </div>
