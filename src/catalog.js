@@ -266,6 +266,56 @@ export const compareSets = (a, b) => {
   return (a.setId || '').localeCompare(b.setId || '');
 };
 
+// ============================================================================
+// Pre-errata twins. A user marks a card as having a pre-errata printing; the
+// catalog then exposes both versions as separate entries (base = post-errata,
+// twin = pre-errata) so they can be logged independently with their own
+// prices, contributions, grading, etc. Persisted in localStorage; survives
+// catalog cache bumps.
+// ============================================================================
+
+const ERRATA_KEY = 'optcg:errata:v1';
+const ERRATA_SUFFIX = '__pre-errata';
+
+const readErrataSet = () => {
+  try {
+    const raw = localStorage.getItem(ERRATA_KEY);
+    return new Set(raw ? JSON.parse(raw) : []);
+  } catch { return new Set(); }
+};
+
+export const getErrataIds = () => readErrataSet();
+
+export const hasPreErrata = (cardId) => readErrataSet().has(cardId);
+
+export const togglePreErrata = (cardId) => {
+  const set = readErrataSet();
+  if (set.has(cardId)) set.delete(cardId); else set.add(cardId);
+  try { localStorage.setItem(ERRATA_KEY, JSON.stringify([...set])); } catch {}
+  return set.has(cardId);
+};
+
+// Given a catalog array, append a pre-errata twin for each card whose base id
+// is in the errata set. Twins share everything with the base except:
+//   - id is suffixed so React keys, entry lookups, and PriceCharting variant
+//     picks stay distinct from the base post-errata printing
+//   - variant/variantTag carry the "Pre-errata" label so the UI shows a pill
+export const augmentWithErrata = (catalog) => {
+  const set = readErrataSet();
+  if (set.size === 0) return catalog;
+  const twins = [];
+  for (const c of catalog) {
+    if (!set.has(c.id)) continue;
+    twins.push({
+      ...c,
+      id: `${c.id}${ERRATA_SUFFIX}`,
+      variant: 'Pre-errata',
+      variantTag: 'pre-errata',
+    });
+  }
+  return twins.length > 0 ? [...catalog, ...twins] : catalog;
+};
+
 export const groupBySet = (cards) => {
   const groups = new Map();
   for (const c of cards) {

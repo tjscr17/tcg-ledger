@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef, useCallback, useReducer } from 'react';
 import { Search, Plus, X, TrendingUp, TrendingDown, Folder, Trash2, DollarSign, Anchor, ChevronRight, Package, BarChart3, RefreshCw, Cloud, HardDrive, ImageOff, Award, Loader2, Pencil } from 'lucide-react';
 import { store, MODE, VAULT_LABEL } from './storage.js';
-import { loadCatalog, loadPriceHistory, groupBySet, compareSets } from './catalog.js';
+import { loadCatalog, loadPriceHistory, groupBySet, compareSets, augmentWithErrata, hasPreErrata, togglePreErrata } from './catalog.js';
 import {
   GRADING_COMPANIES, GRADES_BY_COMPANY,
   fetchGradedPrice, isAggregateAcrossCompanies, hasToken,
@@ -86,6 +86,7 @@ export default function App() {
 
   const [collections, setCollections] = useState([]);
   const [entries, setEntries] = useState([]);
+  const [transactions, setTransactions] = useState([]);
   const [loading, setLoading] = useState(true);
 
   const [view, setView] = useState('collection');
@@ -93,6 +94,7 @@ export default function App() {
   const [detailCard, setDetailCard] = useState(null);
   const [addingCard, setAddingCard] = useState(null);
   const [editingEntry, setEditingEntry] = useState(null);
+  const [sellingEntry, setSellingEntry] = useState(null);
 
   // Load card catalog
   useEffect(() => {
@@ -119,7 +121,11 @@ export default function App() {
 
   // Load user data
   const refreshData = useCallback(async () => {
-    const [cols, ents] = await Promise.all([store.list('collections'), store.list('entries')]);
+    const [cols, ents, txs] = await Promise.all([
+      store.list('collections'),
+      store.list('entries'),
+      store.list('transactions').catch(() => []),
+    ]);
     let cs = cols;
     if (cs.length === 0) {
       const seed = await store.insert('collections', { id: uid(), name: 'Main Collection', created_at: new Date().toISOString() });
@@ -127,6 +133,7 @@ export default function App() {
     }
     setCollections(cs);
     setEntries(ents);
+    setTransactions(txs);
     setActiveCollectionId(prev => prev || cs[0]?.id || null);
   }, []);
 
@@ -138,15 +145,25 @@ export default function App() {
     // Realtime sync (shared mode only)
     const unsubC = store.subscribe('collections', refreshData);
     const unsubE = store.subscribe('entries', refreshData);
-    return () => { unsubC(); unsubE(); };
+    const unsubT = store.subscribe('transactions', refreshData);
+    return () => { unsubC(); unsubE(); unsubT(); };
   }, [refreshData]);
 
-  // Quick catalog lookup
+  // erratTick bumps whenever the user toggles a pre-errata mark so the
+  // augmented catalog recomputes and twins appear/disappear in search.
+  const [erratTick, setErratTick] = useState(0);
+  const augmentedCatalog = useMemo(
+    () => augmentWithErrata(catalog),
+    // erratTick is read inside augmentWithErrata via readErrataSet()
+    [catalog, erratTick] // eslint-disable-line react-hooks/exhaustive-deps
+  );
+
+  // Quick catalog lookup (uses augmented list so entries can resolve to twins).
   const catalogIndex = useMemo(() => {
     const m = new Map();
-    for (const c of catalog) m.set(c.id, c);
+    for (const c of augmentedCatalog) m.set(c.id, c);
     return m;
-  }, [catalog]);
+  }, [augmentedCatalog]);
 
   const addCollection = async (name) => {
     const created = await store.insert('collections', { id: uid(), name, created_at: new Date().toISOString() });
@@ -163,13 +180,38 @@ export default function App() {
     if (activeCollectionId === id) setActiveCollectionId(collections.find(c => c.id !== id)?.id || null);
   };
 
+  // Helper: append a transaction row. card lookup is best-effort so the log
+  // remains useful even if the catalog entry later gets removed/renamed.
+  const logTransaction = async ({ type, entry, sale }) => {
+    const card = catalogIndex.get(entry.card_id);
+    const tx = {
+      id: uid(),
+      collection_id: entry.collection_id,
+      card_id: entry.card_id,
+      card_display_name: card ? `${card.displayId || card.id} ${card.name}` : entry.card_id,
+      type, // 'buy' | 'sell'
+      amount: type === 'sell' ? Number(sale?.amount) || 0 : Number(entry.purchase_price) || 0,
+      contributions: type === 'sell'
+        ? (sale?.contributions || [])
+        : (entry.contributions || []),
+      occurred_at: type === 'sell' ? (sale?.date || null) : (entry.acquired_at || null),
+      notes: type === 'sell' ? (sale?.notes || '') : (entry.notes || ''),
+      created_at: new Date().toISOString(),
+    };
+    const created = await store.insert('transactions', tx);
+    if (created) setTransactions(prev => [...prev, created]);
+  };
+
   const addEntry = async (entry) => {
     const created = await store.insert('entries', {
       ...entry,
       id: uid(),
       added_at: new Date().toISOString(),
     });
-    if (created) setEntries([...entries, created]);
+    if (created) {
+      setEntries([...entries, created]);
+      logTransaction({ type: 'buy', entry: created });
+    }
   };
 
   const updateEntry = async (id, patch) => {
@@ -177,7 +219,17 @@ export default function App() {
     if (updated) setEntries(entries.map(e => e.id === id ? updated : e));
   };
 
+  // Silent removal — used for orphan rows (cards not in catalog) where there
+  // isn't enough info to record a sell. The Sell flow is the normal path.
   const removeEntry = async (id) => {
+    await store.remove('entries', id);
+    setEntries(entries.filter(e => e.id !== id));
+  };
+
+  const sellEntry = async (id, sale) => {
+    const entry = entries.find(e => e.id === id);
+    if (!entry) return;
+    await logTransaction({ type: 'sell', entry, sale });
     await store.remove('entries', id);
     setEntries(entries.filter(e => e.id !== id));
   };
@@ -221,6 +273,7 @@ export default function App() {
             onSearchClick={() => setView('search')}
             onCardClick={(card) => setDetailCard(card)}
             onRemoveEntry={removeEntry}
+            onSellEntry={(entry) => setSellingEntry(entry)}
             onEditEntry={(entry) => {
               const card = catalogIndex.get(entry.card_id);
               if (!card) return;
@@ -231,17 +284,23 @@ export default function App() {
         )}
         {view === 'search' && (
           <SearchView
-            catalog={catalog}
+            catalog={augmentedCatalog}
             onAddCard={setAddingCard}
             onCardClick={setDetailCard}
           />
         )}
         {view === 'resolve' && (
           <ResolveView
-            catalog={catalog}
+            catalog={augmentedCatalog}
             entries={entries}
             onAddCard={setAddingCard}
             onCardClick={setDetailCard}
+          />
+        )}
+        {view === 'transactions' && (
+          <TransactionsView
+            transactions={transactions}
+            collections={collections}
           />
         )}
       </main>
@@ -266,6 +325,18 @@ export default function App() {
         />
       )}
 
+      {sellingEntry && (
+        <SellModal
+          entry={sellingEntry}
+          card={catalogIndex.get(sellingEntry.card_id)}
+          onClose={() => setSellingEntry(null)}
+          onSave={async (sale) => {
+            await sellEntry(sellingEntry.id, sale);
+            setSellingEntry(null);
+          }}
+        />
+      )}
+
       {detailCard && (
         <CardDetailDrawer
           card={detailCard}
@@ -274,6 +345,14 @@ export default function App() {
           onClose={() => setDetailCard(null)}
           onAddToCollection={() => { setAddingCard(detailCard); setDetailCard(null); }}
           onRemoveEntry={removeEntry}
+          onToggleErrata={() => {
+            // Pre-errata twins are stored against the BASE card id (not the
+            // twin's suffixed id), so strip the suffix if the user opened the
+            // twin and clicks "remove pre-errata".
+            const baseId = detailCard.id.replace(/__pre-errata$/, '');
+            togglePreErrata(baseId);
+            setErratTick(t => t + 1);
+          }}
         />
       )}
 
@@ -301,7 +380,7 @@ function Header({ view, setView, collections, activeCollectionId, setActiveColle
       <div className="op-brand">
         <div className="op-brand-mark"><Anchor size={22} strokeWidth={2.5} /></div>
         <div>
-          <div className="op-brand-name">THE LEDGER (LOCAL)</div>
+          <div className="op-brand-name">50.50</div>
           <div className="op-brand-sub">One Piece TCG · Collection Tracker</div>
         </div>
       </div>
@@ -315,6 +394,9 @@ function Header({ view, setView, collections, activeCollectionId, setActiveColle
         </button>
         <button className={`op-nav-btn ${view === 'resolve' ? 'is-active' : ''}`} onClick={() => setView('resolve')}>
           <RefreshCw size={15} /> Resolve
+        </button>
+        <button className={`op-nav-btn ${view === 'transactions' ? 'is-active' : ''}`} onClick={() => setView('transactions')}>
+          <BarChart3 size={15} /> Transactions
         </button>
       </nav>
 
@@ -371,7 +453,7 @@ function ModeIndicator() {
 }
 
 // ============================================================================
-function CollectionView({ collection, entries, catalogIndex, onSearchClick, onCardClick, onRemoveEntry, onEditEntry = () => {} }) {
+function CollectionView({ collection, entries, catalogIndex, onSearchClick, onCardClick, onRemoveEntry, onSellEntry = () => {}, onEditEntry = () => {} }) {
   const stats = useMemo(() => {
     let totalPaid = 0, totalMarket = 0, gradedCount = 0;
     for (const e of entries) {
@@ -449,7 +531,7 @@ function CollectionView({ collection, entries, catalogIndex, onSearchClick, onCa
                   marketValue={marketValue}
                   delta={delta}
                   onClick={() => onCardClick(card)}
-                  onRemove={() => onRemoveEntry(entry.id)}
+                  onSell={() => onSellEntry(entry)}
                   onEdit={() => onEditEntry(entry)}
                 />
               );
@@ -625,7 +707,7 @@ function Stat({ label, value, sub, tone, accent }) {
   );
 }
 
-function EntryRow({ entry, card, marketValue, delta, onClick, onRemove, onEdit }) {
+function EntryRow({ entry, card, marketValue, delta, onClick, onSell, onEdit }) {
   const isGraded = Boolean(entry.grading_company);
   return (
     <div className="op-entry">
@@ -661,8 +743,8 @@ function EntryRow({ entry, card, marketValue, delta, onClick, onRemove, onEdit }
       <button className="op-entry-remove" onClick={onEdit} title="Edit entry">
         <Pencil size={14} />
       </button>
-      <button className="op-entry-remove" onClick={onRemove} title="Remove from collection">
-        <X size={15} />
+      <button className="op-entry-remove op-entry-sell" onClick={onSell} title="Record a sale">
+        <DollarSign size={14} />
       </button>
     </div>
   );
@@ -873,6 +955,239 @@ function SearchView({ catalog, onAddCard, onCardClick }) {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+// ============================================================================
+function SellModal({ entry, card, onClose, onSave }) {
+  const [amount, setAmount] = useState('');
+  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
+  const [contributions, setContributions] = useState(
+    (entry.contributions && entry.contributions.length > 0)
+      ? entry.contributions.map(c => ({ name: c.name, amount: '' }))
+      : []
+  );
+  const [notes, setNotes] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  const addRow = () => setContributions([...contributions, { name: '', amount: '' }]);
+  const updateRow = (i, patch) => setContributions(contributions.map((c, idx) => idx === i ? { ...c, ...patch } : c));
+  const removeRow = (i) => setContributions(contributions.filter((_, idx) => idx !== i));
+
+  const amountNum = Number(amount) || 0;
+  const paid = Number(entry.purchase_price) || 0;
+  const profit = amountNum - paid;
+  const splitTotal = contributions.reduce((s, c) => s + (Number(c.amount) || 0), 0);
+  const splitMismatch = contributions.length > 0 && Math.abs(splitTotal - amountNum) > 0.01;
+
+  const handleSave = async () => {
+    setSaving(true);
+    await onSave({
+      amount: amountNum,
+      date: date || null,
+      notes: notes.trim(),
+      contributions: contributions.filter(c => c.name.trim() && Number(c.amount) > 0).map(c => ({ name: c.name.trim(), amount: Number(c.amount) })),
+    });
+    setSaving(false);
+  };
+
+  return (
+    <div className="op-modal-backdrop" onClick={onClose}>
+      <div className="op-modal" onClick={(e) => e.stopPropagation()}>
+        <button className="op-modal-close" onClick={onClose}><X size={18} /></button>
+        <div className="op-modal-header">
+          {card && <div className="op-modal-art-wrap"><CardArt card={card} /></div>}
+          <div>
+            <div className="op-eyebrow">Recording sale</div>
+            <div className="op-modal-title">{card ? card.name : entry.card_id}</div>
+            <div className="op-modal-sub">
+              {card ? `${card.displayId || card.id} · ${card.setName}` : ''}
+            </div>
+            <div className="op-modal-market">
+              Originally paid: <strong>${paid.toFixed(2)}</strong>
+            </div>
+          </div>
+        </div>
+
+        <div className="op-form">
+          <div className="op-form-row">
+            <Field label="Sale price (USD)">
+              <input
+                type="number" step="0.01" placeholder="0.00"
+                value={amount} onChange={(e) => setAmount(e.target.value)}
+                autoFocus
+              />
+            </Field>
+            <Field label="Date of sale">
+              <input
+                type="date"
+                value={date}
+                onChange={(e) => setDate(e.target.value)}
+              />
+            </Field>
+          </div>
+
+          {amount && (
+            <div className={`op-graded-meta ${profit >= 0 ? '' : 'op-graded-error'}`}>
+              {profit >= 0 ? 'Realized gain' : 'Realized loss'}: <strong>{profit >= 0 ? '+' : ''}${profit.toFixed(2)}</strong>
+              {paid > 0 && <> ({((profit / paid) * 100).toFixed(1)}%)</>}
+            </div>
+          )}
+
+          <div className="op-form-section">
+            <div className="op-form-section-head">
+              <div>
+                <div className="op-form-section-title">Who receives the proceeds</div>
+                <div className="op-form-section-sub">Split the sale among contributors. Leave empty if one person keeps it all.</div>
+              </div>
+              <button className="op-btn-ghost" onClick={addRow}>
+                <Plus size={14} /> Add split
+              </button>
+            </div>
+
+            {contributions.map((c, i) => (
+              <div key={i} className="op-contrib-row">
+                <input
+                  type="text" placeholder="Name"
+                  value={c.name} onChange={(e) => updateRow(i, { name: e.target.value })}
+                />
+                <div className="op-contrib-amount">
+                  <DollarSign size={13} />
+                  <input
+                    type="number" step="0.01" placeholder="0.00"
+                    value={c.amount} onChange={(e) => updateRow(i, { amount: e.target.value })}
+                  />
+                </div>
+                <button className="op-contrib-remove" onClick={() => removeRow(i)}><X size={14} /></button>
+              </div>
+            ))}
+
+            {contributions.length > 0 && (
+              <div className={`op-contrib-check ${splitMismatch ? 'is-warn' : 'is-ok'}`}>
+                Splits total: <strong>${splitTotal.toFixed(2)}</strong> of <strong>${amountNum.toFixed(2)}</strong>
+                {splitMismatch && <span> · doesn't match sale price</span>}
+              </div>
+            )}
+          </div>
+
+          <Field label="Notes (optional)">
+            <textarea rows={2} value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Buyer name, marketplace, etc." />
+          </Field>
+
+          <div className="op-form-actions">
+            <button className="op-btn-ghost" onClick={onClose} disabled={saving}>Cancel</button>
+            <button className="op-btn-primary" onClick={handleSave} disabled={saving || amountNum <= 0}>
+              {saving ? 'Saving…' : 'Record sale'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================================
+function TransactionsView({ transactions, collections }) {
+  const [typeFilter, setTypeFilter] = useState('all'); // 'all' | 'buy' | 'sell'
+  const [collectionFilter, setCollectionFilter] = useState('all');
+
+  const collectionsById = useMemo(() => {
+    const m = new Map();
+    for (const c of collections) m.set(c.id, c);
+    return m;
+  }, [collections]);
+
+  const filtered = useMemo(() => {
+    return transactions
+      .filter(t => typeFilter === 'all' || t.type === typeFilter)
+      .filter(t => collectionFilter === 'all' || t.collection_id === collectionFilter)
+      .sort((a, b) => {
+        const da = a.occurred_at || a.created_at || '';
+        const db = b.occurred_at || b.created_at || '';
+        return db.localeCompare(da); // newest first
+      });
+  }, [transactions, typeFilter, collectionFilter]);
+
+  const totals = useMemo(() => {
+    let bought = 0, sold = 0;
+    for (const t of filtered) {
+      if (t.type === 'buy') bought += Number(t.amount) || 0;
+      if (t.type === 'sell') sold += Number(t.amount) || 0;
+    }
+    return { bought, sold, net: sold - bought };
+  }, [filtered]);
+
+  return (
+    <div className="op-view">
+      <div className="op-page-head">
+        <div>
+          <div className="op-eyebrow">Activity</div>
+          <h1 className="op-page-title">Transactions</h1>
+          <div className="op-page-sub">{filtered.length.toLocaleString()} {filtered.length === 1 ? 'transaction' : 'transactions'}</div>
+        </div>
+      </div>
+
+      <div className="op-stats">
+        <Stat label="Bought (gross)" value={`$${totals.bought.toFixed(2)}`} />
+        <Stat label="Sold (gross)" value={`$${totals.sold.toFixed(2)}`} accent />
+        <Stat
+          label={totals.net >= 0 ? 'Net realized' : 'Net realized loss'}
+          value={`${totals.net >= 0 ? '+' : ''}$${totals.net.toFixed(2)}`}
+          tone={totals.net >= 0 ? 'pos' : 'neg'}
+        />
+        <Stat label="Entries" value={filtered.length} />
+      </div>
+
+      <div className="op-filters">
+        <FilterGroup label="Type" value={typeFilter} onChange={setTypeFilter} options={[
+          { v: 'all', l: 'All' },
+          { v: 'buy', l: 'Buys' },
+          { v: 'sell', l: 'Sells' },
+        ]} />
+        <FilterGroup label="Collection" value={collectionFilter} onChange={setCollectionFilter} mode="select" options={[
+          { v: 'all', l: 'All collections' },
+          ...collections.map(c => ({ v: c.id, l: c.name })),
+        ]} />
+      </div>
+
+      {filtered.length === 0 ? (
+        <div className="op-empty">
+          <BarChart3 size={36} strokeWidth={1.2} />
+          <div className="op-empty-title">No transactions match these filters</div>
+          <div className="op-empty-sub">Add or sell a card from the Collection tab to record one.</div>
+        </div>
+      ) : (
+        <div className="op-tx-list">
+          {filtered.map(t => (
+            <TransactionRow key={t.id} tx={t} collection={collectionsById.get(t.collection_id)} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TransactionRow({ tx, collection }) {
+  const isSell = tx.type === 'sell';
+  const amount = Number(tx.amount) || 0;
+  return (
+    <div className={`op-tx-row ${isSell ? 'is-sell' : 'is-buy'}`}>
+      <div className="op-tx-type">{isSell ? 'SELL' : 'BUY'}</div>
+      <div className="op-tx-main">
+        <div className="op-tx-card">{tx.card_display_name || tx.card_id}</div>
+        <div className="op-tx-meta">
+          {collection?.name || '—'}
+          {tx.occurred_at && <> · {tx.occurred_at}</>}
+          {tx.contributions && tx.contributions.length > 0 && (
+            <> · {tx.contributions.map(c => `${c.name} $${Number(c.amount).toFixed(2)}`).join(', ')}</>
+          )}
+        </div>
+        {tx.notes && <div className="op-tx-notes">{tx.notes}</div>}
+      </div>
+      <div className={`op-tx-amount ${isSell ? 'is-pos' : 'is-neg'}`}>
+        {isSell ? '+' : '−'}${amount.toFixed(2)}
+      </div>
     </div>
   );
 }
@@ -1512,7 +1827,8 @@ function Field({ label, children }) {
 }
 
 // ============================================================================
-function CardDetailDrawer({ card, entries, collections, onClose, onAddToCollection, onRemoveEntry }) {
+function CardDetailDrawer({ card, entries, collections, onClose, onAddToCollection, onRemoveEntry, onToggleErrata }) {
+  const erratMarked = hasPreErrata(card.id.replace(/__pre-errata$/, ''));
   const [history, setHistory] = useState([]);
   const [historyLoading, setHistoryLoading] = useState(true);
 
@@ -1622,6 +1938,13 @@ function CardDetailDrawer({ card, entries, collections, onClose, onAddToCollecti
           )}
 
           <div className="op-drawer-actions">
+            <button
+              className="op-btn-ghost"
+              onClick={onToggleErrata}
+              title={erratMarked ? 'Remove the pre-errata variant from the catalog' : 'Add a pre-errata twin of this card to the catalog'}
+            >
+              {erratMarked ? 'Unmark pre-errata' : 'This card has pre-errata'}
+            </button>
             <button className="op-btn-primary" onClick={onAddToCollection}>
               <Plus size={15} /> Log a copy
             </button>

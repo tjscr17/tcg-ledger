@@ -118,6 +118,27 @@ const solo = {
 //   create policy "vault read r"  on card_resolutions for select using (true);
 //   create policy "vault write r" on card_resolutions for all using (true);
 //
+//   -- Append-only log of buys and sells. Each entry creation writes a 'buy'
+//   -- transaction; each sale writes a 'sell' and deletes the entry.
+//   create table transactions (
+//     id uuid primary key default gen_random_uuid(),
+//     vault_key text not null,
+//     collection_id uuid,
+//     card_id text,
+//     card_display_name text,
+//     type text not null,
+//     amount numeric default 0,
+//     contributions jsonb default '[]',
+//     occurred_at date,
+//     notes text,
+//     created_at timestamptz default now()
+//   );
+//   create index on transactions (vault_key);
+//   alter publication supabase_realtime add table transactions;
+//   alter table transactions enable row level security;
+//   create policy "vault read t"  on transactions for select using (true);
+//   create policy "vault write t" on transactions for all using (true);
+//
 // (You can tighten policies later if you want.)
 
 const shared = {

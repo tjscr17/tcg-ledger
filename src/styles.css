@@ -694,6 +694,41 @@ body { background: var(--paper); }
 .op-grade-badge.is-cgc { background: var(--jade); }
 .op-grade-badge.is-sgc { background: var(--rust); }
 
+/* TRANSACTIONS VIEW + SELL BUTTON */
+.op-entry-sell:hover { background: var(--jade); color: var(--paper); border-color: var(--jade); }
+
+.op-tx-list { display: flex; flex-direction: column; gap: 8px; margin-top: 20px; }
+.op-tx-row {
+  display: grid; grid-template-columns: 70px 1fr auto; gap: 16px; align-items: center;
+  padding: 12px 16px;
+  background: var(--paper); border: 1px solid var(--line-strong);
+  border-left-width: 4px;
+}
+.op-tx-row.is-buy { border-left-color: var(--berry); }
+.op-tx-row.is-sell { border-left-color: var(--jade); }
+.op-tx-type {
+  font-family: var(--mono); font-size: 10px; font-weight: 700;
+  letter-spacing: 0.14em; color: var(--ink-soft);
+}
+.op-tx-main { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.op-tx-card { font-family: var(--display); font-weight: 600; font-size: 15px; }
+.op-tx-meta { font-family: var(--mono); font-size: 10px; color: var(--ink-soft); }
+.op-tx-notes {
+  font-size: 12px; color: var(--ink-soft); font-style: italic; margin-top: 2px;
+  border-left: 3px solid var(--gold); padding-left: 8px;
+}
+.op-tx-amount {
+  font-family: var(--display); font-weight: 700; font-size: 18px;
+  white-space: nowrap;
+}
+.op-tx-amount.is-pos { color: var(--jade); }
+.op-tx-amount.is-neg { color: var(--berry-deep); }
+
+@media (max-width: 700px) {
+  .op-tx-row { grid-template-columns: auto 1fr; }
+  .op-tx-amount { grid-column: 2; justify-self: end; }
+}
+
 /* EQUITY PANEL */
 .op-equity {
   margin-top: 36px; padding: 24px 22px;
