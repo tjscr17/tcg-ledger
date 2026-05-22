@@ -74,8 +74,12 @@ const solo = {
 //     id uuid primary key default gen_random_uuid(),
 //     vault_key text not null,
 //     name text not null,
+//     members jsonb default '[]',
 //     created_at timestamptz default now()
 //   );
+//   -- If your collections table predates the members column, add it now:
+//   --   alter table collections add column if not exists members jsonb default '[]';
+//   --   notify pgrst, 'reload schema';
 //   create table entries (
 //     id uuid primary key default gen_random_uuid(),
 //     vault_key text not null,

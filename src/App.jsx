@@ -193,6 +193,11 @@ export default function App() {
     if (updated) setCollections(collections.map(c => c.id === id ? updated : c));
   };
 
+  const updateMembers = async (id, members) => {
+    const updated = await store.update('collections', id, { members });
+    if (updated) setCollections(collections.map(c => c.id === id ? updated : c));
+  };
+
   const deleteCollection = async (id) => {
     if (collections.length <= 1) return;
     if (!confirm('Delete this collection and all its entries? This cannot be undone.')) return;
@@ -298,6 +303,7 @@ export default function App() {
             onCardClick={(card) => setDetailCard(card)}
             onRemoveEntry={removeEntry}
             onSellEntry={(entry) => setSellingEntry(entry)}
+            onUpdateMembers={(members) => updateMembers(activeCollection.id, members)}
             onEditEntry={(entry) => {
               const card = catalogIndex.get(entry.card_id);
               if (!card) return;
@@ -353,6 +359,7 @@ export default function App() {
         <SellModal
           entry={sellingEntry}
           card={catalogIndex.get(sellingEntry.card_id)}
+          members={Array.isArray(collections.find(c => c.id === sellingEntry.collection_id)?.members) ? collections.find(c => c.id === sellingEntry.collection_id).members : []}
           onClose={() => setSellingEntry(null)}
           onSave={async (sale) => {
             await sellEntry(sellingEntry.id, sale);
@@ -507,7 +514,8 @@ function ModeIndicator() {
 }
 
 // ============================================================================
-function CollectionView({ collection, entries, catalogIndex, variantRev = 0, onSearchClick, onCardClick, onRemoveEntry, onSellEntry = () => {}, onEditEntry = () => {} }) {
+function CollectionView({ collection, entries, catalogIndex, variantRev = 0, onSearchClick, onCardClick, onRemoveEntry, onSellEntry = () => {}, onEditEntry = () => {}, onUpdateMembers = () => {} }) {
+  const members = Array.isArray(collection?.members) ? collection.members : [];
   const stats = useMemo(() => {
     let totalPaid = 0, totalMarket = 0, gradedCount = 0;
     for (const e of entries) {
@@ -539,6 +547,8 @@ function CollectionView({ collection, entries, catalogIndex, variantRev = 0, onS
           <Plus size={16} /> Add Cards
         </button>
       </div>
+
+      <MembersPanel members={members} onUpdate={onUpdateMembers} />
 
       <div className="op-stats">
         <Stat label="Paid In" value={`$${stats.totalPaid.toFixed(2)}`} />
@@ -752,6 +762,85 @@ function EquityPanel({ entries, catalogIndex, totalMarket }) {
             {totalMarket - equity.totalPaid >= 0 ? '+' : ''}${(totalMarket - equity.totalPaid).toFixed(2)}
           </div>
         </div>
+      </div>
+    </div>
+  );
+}
+
+// Used in both AddCardModal and SellModal contribution sections. When members
+// are configured on the active collection, the name field becomes a dropdown
+// (with an "Other…" escape hatch to type a free-form name).
+function ContribRow({ value, members = [], onChange, onRemove }) {
+  const [customMode, setCustomMode] = useState(value.name && !members.includes(value.name));
+  const useDropdown = members.length > 0 && !customMode;
+  return (
+    <div className="op-contrib-row">
+      {useDropdown ? (
+        <select
+          value={value.name || ''}
+          onChange={(e) => {
+            if (e.target.value === '__other__') { setCustomMode(true); onChange({ name: '' }); }
+            else onChange({ name: e.target.value });
+          }}
+        >
+          <option value="">— Pick member —</option>
+          {members.map(m => <option key={m} value={m}>{m}</option>)}
+          <option value="__other__">Other…</option>
+        </select>
+      ) : (
+        <input
+          type="text" placeholder="Name"
+          value={value.name}
+          onChange={(e) => onChange({ name: e.target.value })}
+          onBlur={() => { if (members.length > 0 && !value.name) setCustomMode(false); }}
+        />
+      )}
+      <div className="op-contrib-amount">
+        <DollarSign size={13} />
+        <input
+          type="number" step="0.01" placeholder="0.00"
+          value={value.amount} onChange={(e) => onChange({ amount: e.target.value })}
+        />
+      </div>
+      <button className="op-contrib-remove" onClick={onRemove}><X size={14} /></button>
+    </div>
+  );
+}
+
+function MembersPanel({ members, onUpdate }) {
+  const [adding, setAdding] = useState('');
+
+  const addMember = () => {
+    const name = adding.trim();
+    if (!name) return;
+    if (members.includes(name)) { setAdding(''); return; }
+    onUpdate([...members, name]);
+    setAdding('');
+  };
+  const removeMember = (name) => {
+    if (!confirm(`Remove "${name}" from this collection's members? Existing contributions stay intact, you just won't see their name in the dropdown anymore.`)) return;
+    onUpdate(members.filter(m => m !== name));
+  };
+
+  return (
+    <div className="op-members">
+      <div className="op-members-label">Members</div>
+      <div className="op-members-list">
+        {members.length === 0 && <span className="op-members-empty">No members yet — add one to enable name dropdowns when splitting contributions.</span>}
+        {members.map(m => (
+          <span key={m} className="op-member-chip">
+            {m}
+            <button onClick={() => removeMember(m)} title={`Remove ${m}`}><X size={11} /></button>
+          </span>
+        ))}
+        <input
+          className="op-members-add"
+          placeholder="+ Add member"
+          value={adding}
+          onChange={(e) => setAdding(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') addMember(); }}
+          onBlur={addMember}
+        />
       </div>
     </div>
   );
@@ -1095,7 +1184,7 @@ function SearchView({ catalog, onAddCard, onCardClick }) {
 }
 
 // ============================================================================
-function SellModal({ entry, card, onClose, onSave }) {
+function SellModal({ entry, card, members = [], onClose, onSave }) {
   const [amount, setAmount] = useState('');
   const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
   const [contributions, setContributions] = useState(
@@ -1182,20 +1271,13 @@ function SellModal({ entry, card, onClose, onSave }) {
             </div>
 
             {contributions.map((c, i) => (
-              <div key={i} className="op-contrib-row">
-                <input
-                  type="text" placeholder="Name"
-                  value={c.name} onChange={(e) => updateRow(i, { name: e.target.value })}
-                />
-                <div className="op-contrib-amount">
-                  <DollarSign size={13} />
-                  <input
-                    type="number" step="0.01" placeholder="0.00"
-                    value={c.amount} onChange={(e) => updateRow(i, { amount: e.target.value })}
-                  />
-                </div>
-                <button className="op-contrib-remove" onClick={() => removeRow(i)}><X size={14} /></button>
-              </div>
+              <ContribRow
+                key={i}
+                value={c}
+                members={members}
+                onChange={(patch) => updateRow(i, patch)}
+                onRemove={() => removeRow(i)}
+              />
             ))}
 
             {contributions.length > 0 && (
@@ -1617,6 +1699,10 @@ function FilterGroup({ label, value, onChange, options, mode, compact }) {
 function AddCardModal({ card, entry, collections, activeCollectionId, onClose, onSave }) {
   const editing = Boolean(entry);
   const [collectionId, setCollectionId] = useState(entry?.collection_id || activeCollectionId);
+  const members = useMemo(() => {
+    const col = collections.find(c => c.id === collectionId);
+    return Array.isArray(col?.members) ? col.members : [];
+  }, [collections, collectionId]);
   const [condition, setCondition] = useState(entry?.condition || 'Near Mint');
   const [purchasePrice, setPurchasePrice] = useState(entry ? String(entry.purchase_price ?? '') : '');
   const [contributions, setContributions] = useState(
@@ -1805,20 +1891,13 @@ function AddCardModal({ card, entry, collections, activeCollectionId, onClose, o
             </div>
 
             {contributions.map((c, i) => (
-              <div key={i} className="op-contrib-row">
-                <input
-                  type="text" placeholder="Name"
-                  value={c.name} onChange={(e) => updateContrib(i, { name: e.target.value })}
-                />
-                <div className="op-contrib-amount">
-                  <DollarSign size={13} />
-                  <input
-                    type="number" step="0.01" placeholder="0.00"
-                    value={c.amount} onChange={(e) => updateContrib(i, { amount: e.target.value })}
-                  />
-                </div>
-                <button className="op-contrib-remove" onClick={() => removeContrib(i)}><X size={14} /></button>
-              </div>
+              <ContribRow
+                key={i}
+                value={c}
+                members={members}
+                onChange={(patch) => updateContrib(i, patch)}
+                onRemove={() => removeContrib(i)}
+              />
             ))}
 
             {contributions.length > 0 && (
