@@ -533,6 +533,11 @@ function CollectionView({ collection, entries, catalogIndex, onSearchClick, onCa
                   onClick={() => onCardClick(card)}
                   onSell={() => onSellEntry(entry)}
                   onEdit={() => onEditEntry(entry)}
+                  onDelete={() => {
+                    if (confirm(`Delete this ${card.name} entry? This doesn't record a sale — use the $ button if you sold the card.`)) {
+                      onRemoveEntry(entry.id);
+                    }
+                  }}
                 />
               );
             })}
@@ -707,7 +712,7 @@ function Stat({ label, value, sub, tone, accent }) {
   );
 }
 
-function EntryRow({ entry, card, marketValue, delta, onClick, onSell, onEdit }) {
+function EntryRow({ entry, card, marketValue, delta, onClick, onSell, onEdit, onDelete }) {
   const isGraded = Boolean(entry.grading_company);
   return (
     <div className="op-entry">
@@ -745,6 +750,9 @@ function EntryRow({ entry, card, marketValue, delta, onClick, onSell, onEdit }) 
       </button>
       <button className="op-entry-remove op-entry-sell" onClick={onSell} title="Record a sale">
         <DollarSign size={14} />
+      </button>
+      <button className="op-entry-remove" onClick={onDelete} title="Delete entry (no transaction logged)">
+        <Trash2 size={14} />
       </button>
     </div>
   );
