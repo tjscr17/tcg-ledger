@@ -80,6 +80,11 @@ const solo = {
 //   -- If your collections table predates the members column, add it now:
 //   --   alter table collections add column if not exists members jsonb default '[]';
 //   --   notify pgrst, 'reload schema';
+//
+//   -- entries also gains an optional bgs_black boolean for BGS 10 Black Label
+//   -- (Perfect 10). Run if your entries table predates it:
+//   --   alter table entries add column if not exists bgs_black boolean default false;
+//   --   notify pgrst, 'reload schema';
 //   create table entries (
 //     id uuid primary key default gen_random_uuid(),
 //     vault_key text not null,

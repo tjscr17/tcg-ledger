@@ -966,7 +966,7 @@ function EntryRow({ entry, card, marketValue, delta, onClick, onSell, onEdit, on
           <div className="op-entry-cardname">
             <span className="op-entry-cardname-text">{card.name}</span>
             <VariantPill variant={card.variant} />
-            {isGraded && <GradingBadge company={entry.grading_company} grade={entry.grade} />}
+            {isGraded && <GradingBadge company={entry.grading_company} grade={entry.grade} bgsBlack={entry.bgs_black} />}
           </div>
           <div className="op-entry-cardset">
             <span className="op-entry-id">{card.displayId || card.id}</span> · {card.setName} · {RARITY_LABELS[card.rarity] || card.rarity}
@@ -974,7 +974,7 @@ function EntryRow({ entry, card, marketValue, delta, onClick, onSell, onEdit, on
         </div>
         <div className="op-entry-cell">
           <div className="op-entry-cell-label">{isGraded ? 'Grade' : 'Condition'}</div>
-          <div className="op-entry-cell-val">{isGraded ? `${entry.grading_company} ${entry.grade}` : (entry.condition || '—')}</div>
+          <div className="op-entry-cell-val">{isGraded ? `${entry.grading_company} ${entry.grade}${entry.bgs_black ? ' Black' : ''}` : (entry.condition || '—')}</div>
         </div>
         <div className="op-entry-cell">
           <div className="op-entry-cell-label">Paid</div>
@@ -1002,11 +1002,13 @@ function EntryRow({ entry, card, marketValue, delta, onClick, onSell, onEdit, on
   );
 }
 
-function GradingBadge({ company, grade }) {
+function GradingBadge({ company, grade, bgsBlack }) {
+  const label = bgsBlack ? `${company} ${grade} BL` : `${company} ${grade}`;
+  const classKey = bgsBlack ? 'bgs-black' : (company || '').toLowerCase();
   return (
-    <span className={`op-grade-badge is-${(company || '').toLowerCase()}`} title={`${company} ${grade}`}>
+    <span className={`op-grade-badge is-${classKey}`} title={bgsBlack ? `${company} ${grade} Black Label (Perfect 10)` : `${company} ${grade}`}>
       <Award size={11} />
-      {company} {grade}
+      {label}
     </span>
   );
 }
@@ -1898,6 +1900,7 @@ function AddCardModal({ card, entry, collections, activeCollectionId, onClose, o
   const [isGraded, setIsGraded] = useState(Boolean(entry?.grading_company));
   const [gradingCompany, setGradingCompany] = useState(entry?.grading_company || 'PSA');
   const [grade, setGrade] = useState(entry?.grade ?? 10);
+  const [bgsBlack, setBgsBlack] = useState(Boolean(entry?.bgs_black));
   const [certNumber, setCertNumber] = useState(entry?.cert_number || '');
   const [gradedPrice, setGradedPrice] = useState(entry?.graded_price ? String(entry.graded_price) : '');
   const [pcProductId, setPcProductId] = useState(entry?.pc_product_id || '');
@@ -1976,11 +1979,14 @@ function AddCardModal({ card, entry, collections, activeCollectionId, onClose, o
     }
   }, [isGraded, variants.length, variantsLoading, variantsError, loadVariants]);
 
-  // Refetch price whenever the chosen variant or grade changes
+  // Refetch price whenever the chosen variant or grade changes.
+  // BGS Black Label has no PriceCharting API field — skip auto-fetch in that
+  // mode so we don't silently populate with the regular BGS 10 price.
   useEffect(() => {
     if (!isGraded || !pcProductId) return;
+    if (bgsBlack) return;
     refreshGradedPrice();
-  }, [isGraded, pcProductId, gradingCompany, grade, refreshGradedPrice]);
+  }, [isGraded, pcProductId, gradingCompany, grade, bgsBlack, refreshGradedPrice]);
 
   const selectedVariant = variants.find(v => String(v.id) === pcProductId);
 
@@ -1997,6 +2003,7 @@ function AddCardModal({ card, entry, collections, activeCollectionId, onClose, o
       acquired_at: acquiredAt || null,
       grading_company: isGraded ? gradingCompany : null,
       grade: isGraded ? Number(grade) : null,
+      bgs_black: Boolean(isGraded && gradingCompany === 'BGS' && Number(grade) === 10 && bgsBlack),
       cert_number: isGraded ? certNumber.trim() : '',
       graded_price: isGraded ? (Number(gradedPrice) || 0) : 0,
       pc_product_id: isGraded ? pcProductId : '',
@@ -2124,6 +2131,13 @@ function AddCardModal({ card, entry, collections, activeCollectionId, onClose, o
                     <input type="text" placeholder="e.g. 12345678" value={certNumber} onChange={(e) => setCertNumber(e.target.value)} />
                   </Field>
                 </div>
+
+                {gradingCompany === 'BGS' && Number(grade) === 10 && (
+                  <label className="op-graded-toggle" style={{ marginBottom: 8 }}>
+                    <input type="checkbox" checked={bgsBlack} onChange={(e) => setBgsBlack(e.target.checked)} />
+                    <span>Black Label (Perfect 10 · all four subgrades = 10) — manual price only</span>
+                  </label>
+                )}
 
                 <Field label="PriceCharting variant">
                   <div className="op-variant-row">
@@ -2301,10 +2315,10 @@ function CardDetailDrawer({ card, entries, collections, onClose, onAddToCollecti
                       <div>
                         <div className="op-detail-entry-collection">
                           {col?.name || 'Unknown collection'}
-                          {isGraded && <GradingBadge company={entry.grading_company} grade={entry.grade} />}
+                          {isGraded && <GradingBadge company={entry.grading_company} grade={entry.grade} bgsBlack={entry.bgs_black} />}
                         </div>
                         <div className="op-detail-entry-meta">
-                          {isGraded ? `${entry.grading_company} ${entry.grade}` : entry.condition} · Paid ${Number(entry.purchase_price || 0).toFixed(2)}
+                          {isGraded ? `${entry.grading_company} ${entry.grade}${entry.bgs_black ? ' Black Label' : ''}` : entry.condition} · Paid ${Number(entry.purchase_price || 0).toFixed(2)}
                           {entry.acquired_at && <> · Acquired {entry.acquired_at}</>}
                         </div>
                         {isGraded && (

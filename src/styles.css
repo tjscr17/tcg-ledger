@@ -694,6 +694,7 @@ body { background: var(--paper); }
 }
 .op-grade-badge.is-psa { background: var(--berry); }
 .op-grade-badge.is-bgs { background: var(--navy); }
+.op-grade-badge.is-bgs-black { background: #0a0a0a; color: var(--gold); border: 1px solid var(--gold); }
 .op-grade-badge.is-cgc { background: var(--jade); }
 .op-grade-badge.is-sgc { background: var(--rust); }
 
