@@ -534,6 +534,7 @@ function ModeIndicator() {
 function CollectionView({ collection, entries, catalogIndex, variantRev = 0, onSearchClick, onCardClick, onRemoveEntry, onSellEntry = () => {}, onEditEntry = () => {}, onUpdateMembers = () => {} }) {
   const members = Array.isArray(collection?.members) ? collection.members : [];
   const [entrySort, setEntrySort] = useStoredState('optcg:collection:entrySort', 'recent');
+  const [colQ, setColQ] = useStoredState('optcg:collection:q', '');
 
   // Effective market value for an entry — uses the entry's stored graded
   // price when present, otherwise falls back to the cached PriceCharting raw.
@@ -543,8 +544,22 @@ function CollectionView({ collection, entries, catalogIndex, variantRev = 0, onS
     return card ? effectiveRawPrice(card) : 0;
   }, [catalogIndex]);
 
+  const searchedEntries = useMemo(() => {
+    const needle = colQ.trim().toLowerCase();
+    if (!needle) return entries;
+    return entries.filter(e => {
+      const c = catalogIndex.get(e.card_id);
+      const hay = [
+        c?.name, c?.fullName, c?.variant, c?.id, c?.displayId, c?.setName,
+        e.condition, e.notes, e.grading_company,
+        ...(e.contributions || []).map(x => x.name),
+      ].filter(Boolean).join(' ').toLowerCase();
+      return hay.includes(needle);
+    });
+  }, [entries, catalogIndex, colQ]);
+
   const sortedEntries = useMemo(() => {
-    const arr = [...entries];
+    const arr = [...searchedEntries];
     const cardOf = (e) => catalogIndex.get(e.card_id);
     switch (entrySort) {
       case 'name':
@@ -572,7 +587,7 @@ function CollectionView({ collection, entries, catalogIndex, variantRev = 0, onS
     }
     return arr;
     // variantRev forces resort when fresh PC prices land
-  }, [entries, catalogIndex, entrySort, variantRev, marketValueOf]);
+  }, [searchedEntries, catalogIndex, entrySort, variantRev, marketValueOf]);
   const stats = useMemo(() => {
     let totalPaid = 0, totalMarket = 0, gradedCount = 0;
     for (const e of entries) {
@@ -630,6 +645,20 @@ function CollectionView({ collection, entries, catalogIndex, variantRev = 0, onS
         </div>
       ) : (
         <>
+          <div className="op-search-bar op-search-bar-inline">
+            <Search size={16} className="op-search-icon" />
+            <input
+              className="op-search-input"
+              placeholder="Search this collection — name, ID, set, owner, notes…"
+              value={colQ}
+              onChange={(e) => setColQ(e.target.value)}
+            />
+            {colQ && (
+              <button className="op-search-clear" onClick={() => setColQ('')}>
+                <X size={15} />
+              </button>
+            )}
+          </div>
           <div className="op-entries-sort">
             <span className="op-entries-sort-label">Sort by</span>
             <select value={entrySort} onChange={(e) => setEntrySort(e.target.value)}>

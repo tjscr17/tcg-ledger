@@ -697,6 +697,10 @@ body { background: var(--paper); }
 .op-grade-badge.is-cgc { background: var(--jade); }
 .op-grade-badge.is-sgc { background: var(--rust); }
 
+/* COLLECTION SEARCH (inline variant of the search bar) */
+.op-search-bar-inline { margin: 14px 0 6px; }
+.op-search-bar-inline .op-search-input { font-size: 14px; padding: 10px 14px 10px 40px; }
+
 /* ENTRY SORT */
 .op-entries-sort {
   display: flex; align-items: center; gap: 10px;
