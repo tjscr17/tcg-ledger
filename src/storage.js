@@ -85,6 +85,13 @@ const solo = {
 //   -- (Perfect 10). Run if your entries table predates it:
 //   --   alter table entries add column if not exists bgs_black boolean default false;
 //   --   notify pgrst, 'reload schema';
+//
+//   -- transactions gains an optional entry_id to link buys/sells to their
+//   -- originating entry. Required for "move card between collections" to
+//   -- carry the capital allocation. Backfilling is automatic — moving an
+//   -- entry stamps entry_id onto any matching legacy buy tx the first time.
+//   --   alter table transactions add column if not exists entry_id text;
+//   --   notify pgrst, 'reload schema';
 //   create table entries (
 //     id uuid primary key default gen_random_uuid(),
 //     vault_key text not null,

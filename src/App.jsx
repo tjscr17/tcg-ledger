@@ -231,6 +231,8 @@ export default function App() {
 
   // Helper: append a transaction row. card lookup is best-effort so the log
   // remains useful even if the catalog entry later gets removed/renamed.
+  // `entry_id` links buy/sell txs back to the entry so cross-collection
+  // moves can carry the buy's capital allocation along with the card.
   const logTransaction = async ({ type, entry, sale }) => {
     const card = catalogIndex.get(entry.card_id);
     const tx = {
@@ -238,6 +240,7 @@ export default function App() {
       collection_id: entry.collection_id,
       card_id: entry.card_id,
       card_display_name: card ? `${card.displayId || card.id} ${card.name}` : entry.card_id,
+      entry_id: entry.id,
       type, // 'buy' | 'sell'
       amount: type === 'sell' ? Number(sale?.amount) || 0 : Number(entry.purchase_price) || 0,
       contributions: type === 'sell'
@@ -264,8 +267,33 @@ export default function App() {
   };
 
   const updateEntry = async (id, patch) => {
+    const before = entries.find(e => e.id === id);
     const updated = await store.update('entries', id, patch);
-    if (updated) setEntries(entries.map(e => e.id === id ? updated : e));
+    if (!updated) return;
+    setEntries(entries.map(e => e.id === id ? updated : e));
+
+    // If the user moved the entry to a different collection, drag its buy
+    // transactions along so the capital allocation follows the card. Match
+    // by entry_id (set on tx insert) when available, otherwise fall back to
+    // card_id + occurred_at heuristic for legacy buy txs.
+    if (before && patch.collection_id && patch.collection_id !== before.collection_id) {
+      const oldDate = (before.acquired_at || (before.added_at || '').slice(0, 10) || '').slice(0, 10);
+      const linked = transactions.filter(t => {
+        if (t.type !== 'buy') return false;
+        if (t.entry_id) return t.entry_id === id;
+        if (t.collection_id !== before.collection_id) return false;
+        if (t.card_id !== before.card_id) return false;
+        const txDate = (t.occurred_at || '').slice(0, 10);
+        return txDate === oldDate;
+      });
+      for (const tx of linked) {
+        const patchTx = { collection_id: patch.collection_id };
+        // Backfill the entry_id link too if it was missing.
+        if (!tx.entry_id) patchTx.entry_id = id;
+        const updatedTx = await store.update('transactions', tx.id, patchTx);
+        if (updatedTx) setTransactions(prev => prev.map(t => t.id === tx.id ? updatedTx : t));
+      }
+    }
   };
 
   // Silent removal — used for orphan rows (cards not in catalog) where there
@@ -370,14 +398,6 @@ export default function App() {
               const existing = watchlist.find(w => w.card_id === card.id);
               if (existing) await removeFromWatchlist(existing.id);
               else await addToWatchlist(card);
-            }}
-            onWatchMany={async (cards) => {
-              const have = new Set(watchlist.map(w => w.card_id));
-              for (const card of cards) {
-                if (have.has(card.id)) continue;
-                await addToWatchlist(card);
-                have.add(card.id);
-              }
             }}
           />
         )}
@@ -1215,7 +1235,7 @@ function CardThumb({ card, size = 60 }) {
 }
 
 // ============================================================================
-function SearchView({ catalog, watchlist = [], onAddCard, onCardClick, onToggleWatch = () => {}, onWatchMany = () => {} }) {
+function SearchView({ catalog, watchlist = [], onAddCard, onCardClick, onToggleWatch = () => {} }) {
   const watchedIds = useMemo(() => new Set(watchlist.map(w => w.card_id)), [watchlist]);
   const [q, setQ] = useStoredState('optcg:search:q', '');
   const [setFilter, setSetFilter] = useStoredState('optcg:search:setFilter', 'all');
@@ -1435,22 +1455,6 @@ function SearchView({ catalog, watchlist = [], onAddCard, onCardClick, onToggleW
 
       <div className="op-results-count">
         {sorted.length.toLocaleString()} {sorted.length === 1 ? 'result' : 'results'}
-        {sorted.length > 0 && (() => {
-          const unwatched = sorted.filter(c => !watchedIds.has(c.id));
-          if (unwatched.length === 0) return null;
-          return (
-            <button
-              className="op-clear-filters"
-              onClick={() => {
-                if (confirm(`Add ${unwatched.length.toLocaleString()} ${unwatched.length === 1 ? 'card' : 'cards'} to your watch list?`)) {
-                  onWatchMany(unwatched);
-                }
-              }}
-            >
-              + Watch all {unwatched.length.toLocaleString()}
-            </button>
-          );
-        })()}
         {(q || setFilter !== 'all' || totalHidden > 0 || (filterDim !== 'none' && filterValue !== 'all')) && (
           <button className="op-clear-filters" onClick={() => {
             setQ(''); setSetFilter('all'); setFilterDim('none'); setFilterValue('all'); setHideDim('none'); clearAllHides();
@@ -1941,7 +1945,15 @@ function ExpenseModal({ members = [], collection, onClose, onSave }) {
 // ============================================================================
 function TransactionsView({ transactions, collections, entries = [], catalogIndex = new Map(), variantRev = 0, activeCollectionId, onLogTransaction = () => {} }) {
   const [typeFilter, setTypeFilter] = useState('all'); // 'all' | 'buy' | 'sell' | 'transfer' | 'expense'
-  const [collectionFilter, setCollectionFilter] = useState('all');
+  // Default the transactions view to the active collection — most users want
+  // their current pool, not a global feed. The dropdown still has "All
+  // collections" if you want to override. Re-mounting the view (navigating
+  // away and back) resets to the active collection again.
+  const [collectionFilter, setCollectionFilter] = useState(() => activeCollectionId || 'all');
+  // Follow active-collection changes from the header picker.
+  useEffect(() => {
+    if (activeCollectionId) setCollectionFilter(activeCollectionId);
+  }, [activeCollectionId]);
   const [modal, setModal] = useState(null); // 'transfer' | 'expense' | null
 
   const collectionsById = useMemo(() => {
