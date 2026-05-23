@@ -717,6 +717,14 @@ body { background: var(--paper); }
 .op-search-bar-inline .op-search-input { font-size: 14px; padding: 10px 14px 10px 40px; }
 
 /* PSA CERT MODAL */
+.op-cert-debug { font-size: 11px; color: var(--ink-soft); }
+.op-cert-debug summary { cursor: pointer; font-family: var(--mono); padding: 4px 0; }
+.op-cert-debug pre {
+  background: var(--paper-warm); border: 1px solid var(--line);
+  padding: 8px 10px; font-size: 11px; line-height: 1.4;
+  overflow-x: auto; margin: 0;
+}
+
 .op-page-head-actions { display: flex; gap: 8px; }
 .op-cert-result { display: flex; flex-direction: column; gap: 12px; margin-top: 10px; }
 .op-cert-row { display: flex; gap: 10px; align-items: baseline; padding: 8px 12px; background: var(--paper-warm); border-left: 3px solid var(--jade); }

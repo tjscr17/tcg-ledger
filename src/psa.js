@@ -54,23 +54,81 @@ export const fetchCert = async (certNumber) => {
   };
 };
 
+// OPTCG card IDs follow patterns like OP01-016, ST21-005, EB-01-008,
+// OP14-EB04-022, etc. Pull any of those out of an arbitrary string.
+const OPTCG_ID_RE = /\b(OP|ST|EB|PRB)\s*[- ]?\s*(\d{1,2})\s*[- ]?\s*(\d{2,3})(?:\s*[- ]?\s*(EB\d{1,2}))?\s*[- ]?\s*(\d{2,3})?\b/gi;
+const extractOptcgIds = (s) => {
+  if (!s) return [];
+  const ids = [];
+  const text = String(s).toUpperCase();
+  let m;
+  OPTCG_ID_RE.lastIndex = 0;
+  while ((m = OPTCG_ID_RE.exec(text)) !== null) {
+    const [, prefix, setNum, n1, ebPart, n2] = m;
+    if (ebPart && n2) {
+      ids.push(`${prefix}${setNum.padStart(2, '0')}-${ebPart}-${n2.padStart(3, '0')}`);
+    } else {
+      // Try both with and without leading zeros, separator variations
+      const set = `${prefix}${setNum.padStart(2, '0')}`;
+      const num = n1.padStart(3, '0');
+      ids.push(`${set}-${num}`);
+      ids.push(`${prefix}-${setNum.padStart(2, '0')}-${num}`);
+    }
+  }
+  return ids;
+};
+
+const norm = (s) => (s || '').toString().toUpperCase().replace(/[\s_]/g, '');
+
 // Heuristic match: find the OPTCG catalog card that corresponds to the PSA
-// cert. PSA's `CardNumber` is usually the bare card_set_id like "OP01-016".
-// Returns the catalog card object or null. `catalog` is the array; we don't
-// require a Map so callers don't have to build one just for this call.
+// cert. PSA's CardNumber format varies — it can be the bare card_set_id, a
+// stripped variant, the running number only, or buried in VarietyPedigree
+// / Subject. We try several strategies and prefer the most specific match.
 export const matchCatalogCard = (cert, catalog) => {
-  if (!cert || !cert.card_number || !Array.isArray(catalog)) return null;
-  const needle = cert.card_number.trim().toUpperCase();
-  const candidates = catalog.filter(c => (c.displayId || c.id || '').toUpperCase() === needle);
-  if (candidates.length === 0) return null;
-  if (candidates.length === 1) return candidates[0];
-  // Multiple printings share displayId (base + parallel/alt-art). Prefer the
-  // one whose name most-closely matches the PSA subject.
-  const subject = (cert.subject || '').toLowerCase();
-  const scored = candidates.map(c => ({
-    card: c,
-    score: subject && (c.name || '').toLowerCase().includes(subject.split(' ')[0]) ? 1 : 0,
-  }));
-  scored.sort((a, b) => b.score - a.score);
-  return scored[0].card;
+  if (!cert || !Array.isArray(catalog)) return null;
+
+  // 1. Collect every candidate OPTCG id we can extract from the PSA payload.
+  const candidates = new Set();
+  for (const field of [cert.card_number, cert.subject, cert.brand, cert.raw?.VarietyPedigree, cert.raw?.Subject, cert.raw?.Brand, cert.raw?.CardNumber]) {
+    for (const id of extractOptcgIds(field)) candidates.add(id);
+  }
+  // Also try the raw card_number as a normalized direct match.
+  if (cert.card_number) candidates.add(norm(cert.card_number).replace(/-/g, '').replace(/^(OP|ST|EB|PRB)(\d+)(\d{3})$/i, '$1$2-$3'));
+
+  // 2. Build a quick lookup table over the catalog using multiple key forms.
+  const byKey = new Map();
+  for (const c of catalog) {
+    const display = (c.displayId || c.id || '').toUpperCase();
+    const variants = [display, norm(display), display.replace(/-/g, '')];
+    for (const k of variants) if (k && !byKey.has(k)) byKey.set(k, c);
+  }
+
+  // 3. Try each candidate id against the lookup.
+  let match = null;
+  for (const cand of candidates) {
+    const u = cand.toUpperCase();
+    match = byKey.get(u) || byKey.get(norm(u)) || byKey.get(u.replace(/-/g, ''));
+    if (match) break;
+  }
+
+  // 4. Last resort: fuzzy-match PSA subject against catalog card names.
+  if (!match && cert.subject) {
+    const subj = cert.subject.toLowerCase();
+    const namedHits = catalog.filter(c => (c.name || '').toLowerCase().includes(subj.split(/[\s,]/)[0]));
+    if (namedHits.length === 1) match = namedHits[0];
+  }
+
+  if (!match) return null;
+
+  // 5. If multiple printings share that display id (base + parallel/alt-art),
+  // refine by checking PSA's pedigree / subject for "ALTERNATE", "PARALLEL", etc.
+  const targetDisplay = (match.displayId || match.id || '').toUpperCase();
+  const same = catalog.filter(c => (c.displayId || c.id || '').toUpperCase() === targetDisplay);
+  if (same.length > 1) {
+    const blob = `${cert.raw?.VarietyPedigree || ''} ${cert.subject || ''}`.toLowerCase();
+    const wantsParallel = /alternate|parallel|alt[- ]art|sp\b|spr\b/.test(blob);
+    const preferred = same.find(c => Boolean(c.isParallel) === wantsParallel);
+    if (preferred) return preferred;
+  }
+  return match;
 };

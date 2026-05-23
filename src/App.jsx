@@ -1939,6 +1939,18 @@ function AddByCertModal({ catalog, collections, activeCollectionId, onClose, onS
                   {cert.card_number && <> · {cert.card_number}</>}
                 </span>
               </div>
+              <details className="op-cert-debug">
+                <summary>What PSA returned</summary>
+                <pre>{JSON.stringify({
+                  CardNumber: cert.raw?.CardNumber,
+                  VarietyPedigree: cert.raw?.VarietyPedigree,
+                  Subject: cert.raw?.Subject,
+                  Brand: cert.raw?.Brand,
+                  Year: cert.raw?.Year,
+                  Category: cert.raw?.Category,
+                  GradeDescription: cert.raw?.GradeDescription,
+                }, null, 2)}</pre>
+              </details>
 
               {matchedCard ? (
                 <div className="op-cert-match">
