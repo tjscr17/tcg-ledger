@@ -296,11 +296,27 @@ export default function App() {
     }
   };
 
-  // Silent removal — used for orphan rows (cards not in catalog) where there
-  // isn't enough info to record a sell. The Sell flow is the normal path.
+  // Cleanup removal — used for mis-logged entries (and orphan rows where
+  // there's not enough info to record a sell). Also nukes any matching buy
+  // tx so the equity panel rebalances as if the entry never existed. The
+  // Sell flow remains the normal path for actual divestments.
   const removeEntry = async (id) => {
+    const before = entries.find(e => e.id === id);
     await store.remove('entries', id);
     setEntries(entries.filter(e => e.id !== id));
+    if (!before) return;
+    const oldDate = (before.acquired_at || (before.added_at || '').slice(0, 10) || '').slice(0, 10);
+    const linkedBuys = transactions.filter(t => {
+      if (t.type !== 'buy') return false;
+      if (t.entry_id) return t.entry_id === id;
+      if (t.collection_id !== before.collection_id) return false;
+      if (t.card_id !== before.card_id) return false;
+      return (t.occurred_at || '').slice(0, 10) === oldDate;
+    });
+    for (const tx of linkedBuys) {
+      await store.remove('transactions', tx.id);
+      setTransactions(prev => prev.filter(t => t.id !== tx.id));
+    }
   };
 
   const addToWatchlist = async (card, opts = {}) => {
