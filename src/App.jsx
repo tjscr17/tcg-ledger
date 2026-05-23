@@ -553,14 +553,14 @@ function Header({ view, setView, collections, activeCollectionId, setActiveColle
         <button className={`op-nav-btn ${view === 'collection' ? 'is-active' : ''}`} onClick={() => setView('collection')}>
           <Folder size={15} /> Collection
         </button>
+        <button className={`op-nav-btn ${view === 'transactions' ? 'is-active' : ''}`} onClick={() => setView('transactions')}>
+          <BarChart3 size={15} /> Transactions
+        </button>
         <button className={`op-nav-btn ${view === 'search' ? 'is-active' : ''}`} onClick={() => setView('search')}>
           <Search size={15} /> Search
         </button>
         <button className={`op-nav-btn ${view === 'watch' ? 'is-active' : ''}`} onClick={() => setView('watch')}>
           <Eye size={15} /> Watch
-        </button>
-        <button className={`op-nav-btn ${view === 'transactions' ? 'is-active' : ''}`} onClick={() => setView('transactions')}>
-          <BarChart3 size={15} /> Transactions
         </button>
         <button className={`op-nav-btn ${view === 'resolve' ? 'is-active' : ''}`} onClick={() => setView('resolve')}>
           <RefreshCw size={15} /> Resolve
