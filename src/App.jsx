@@ -455,9 +455,6 @@ function Header({ view, setView, collections, activeCollectionId, setActiveColle
       </div>
 
       <nav className="op-nav">
-        <button className={`op-nav-btn ${view === 'resolve' ? 'is-active' : ''}`} onClick={() => setView('resolve')}>
-          <RefreshCw size={15} /> Resolve
-        </button>
         <button className={`op-nav-btn ${view === 'collection' ? 'is-active' : ''}`} onClick={() => setView('collection')}>
           <Folder size={15} /> Collection
         </button>
@@ -466,6 +463,9 @@ function Header({ view, setView, collections, activeCollectionId, setActiveColle
         </button>
         <button className={`op-nav-btn ${view === 'transactions' ? 'is-active' : ''}`} onClick={() => setView('transactions')}>
           <BarChart3 size={15} /> Transactions
+        </button>
+        <button className={`op-nav-btn ${view === 'resolve' ? 'is-active' : ''}`} onClick={() => setView('resolve')}>
+          <RefreshCw size={15} /> Resolve
         </button>
       </nav>
 
