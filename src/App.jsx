@@ -645,6 +645,8 @@ function CollectionView({ collection, entries, catalogIndex, variantRev = 0, onS
         </div>
       ) : (
         <>
+          <EquityPanel entries={entries} catalogIndex={catalogIndex} totalMarket={stats.totalMarket} />
+
           <div className="op-search-bar op-search-bar-inline">
             <Search size={16} className="op-search-icon" />
             <input
@@ -707,8 +709,6 @@ function CollectionView({ collection, entries, catalogIndex, variantRev = 0, onS
               );
             })}
           </div>
-
-          <EquityPanel entries={entries} catalogIndex={catalogIndex} totalMarket={stats.totalMarket} />
         </>
       )}
     </div>
