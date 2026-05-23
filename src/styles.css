@@ -449,6 +449,18 @@ body { background: var(--paper); }
   transition: all 0.12s;
 }
 .op-card-tile-add:hover { background: var(--ink); color: var(--paper); }
+.op-card-tile-actions { display: flex; border-top: 1px solid var(--line); }
+.op-card-tile-actions .op-card-tile-add { flex: 1; border-top: none; }
+.op-card-tile-watch {
+  flex: 0 0 auto; padding: 7px 12px;
+  background: var(--paper-warm); border: none; border-left: 1px solid var(--line);
+  cursor: pointer; color: var(--ink-soft);
+  display: flex; align-items: center; justify-content: center;
+  transition: all 0.12s;
+}
+.op-card-tile-watch:hover { background: var(--ink); color: var(--paper); }
+.op-card-tile-watch.is-active { background: var(--jade); color: var(--paper); }
+.op-card-tile-watch.is-active:hover { background: var(--berry); }
 
 /* MODAL */
 .op-modal-backdrop {

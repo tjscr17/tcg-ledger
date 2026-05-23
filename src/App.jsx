@@ -363,8 +363,22 @@ export default function App() {
         {view === 'search' && (
           <SearchView
             catalog={augmentedCatalog}
+            watchlist={watchlist}
             onAddCard={setAddingCard}
             onCardClick={setDetailCard}
+            onToggleWatch={async (card) => {
+              const existing = watchlist.find(w => w.card_id === card.id);
+              if (existing) await removeFromWatchlist(existing.id);
+              else await addToWatchlist(card);
+            }}
+            onWatchMany={async (cards) => {
+              const have = new Set(watchlist.map(w => w.card_id));
+              for (const card of cards) {
+                if (have.has(card.id)) continue;
+                await addToWatchlist(card);
+                have.add(card.id);
+              }
+            }}
           />
         )}
         {view === 'resolve' && (
@@ -381,6 +395,7 @@ export default function App() {
             catalogIndex={catalogIndex}
             variantRev={variantRev}
             onCardClick={setDetailCard}
+            onBrowseCatalog={() => setView('search')}
             onRemove={removeFromWatchlist}
             onUpdate={updateWatchlistItem}
           />
@@ -1200,7 +1215,8 @@ function CardThumb({ card, size = 60 }) {
 }
 
 // ============================================================================
-function SearchView({ catalog, onAddCard, onCardClick }) {
+function SearchView({ catalog, watchlist = [], onAddCard, onCardClick, onToggleWatch = () => {}, onWatchMany = () => {} }) {
+  const watchedIds = useMemo(() => new Set(watchlist.map(w => w.card_id)), [watchlist]);
   const [q, setQ] = useStoredState('optcg:search:q', '');
   const [setFilter, setSetFilter] = useStoredState('optcg:search:setFilter', 'all');
   const [filterDim, setFilterDim] = useStoredState('optcg:search:filterDim', 'none'); // 'none' | 'rarity' | 'color'
@@ -1419,6 +1435,22 @@ function SearchView({ catalog, onAddCard, onCardClick }) {
 
       <div className="op-results-count">
         {sorted.length.toLocaleString()} {sorted.length === 1 ? 'result' : 'results'}
+        {sorted.length > 0 && (() => {
+          const unwatched = sorted.filter(c => !watchedIds.has(c.id));
+          if (unwatched.length === 0) return null;
+          return (
+            <button
+              className="op-clear-filters"
+              onClick={() => {
+                if (confirm(`Add ${unwatched.length.toLocaleString()} ${unwatched.length === 1 ? 'card' : 'cards'} to your watch list?`)) {
+                  onWatchMany(unwatched);
+                }
+              }}
+            >
+              + Watch all {unwatched.length.toLocaleString()}
+            </button>
+          );
+        })()}
         {(q || setFilter !== 'all' || totalHidden > 0 || (filterDim !== 'none' && filterValue !== 'all')) && (
           <button className="op-clear-filters" onClick={() => {
             setQ(''); setSetFilter('all'); setFilterDim('none'); setFilterValue('all'); setHideDim('none'); clearAllHides();
@@ -1434,6 +1466,8 @@ function SearchView({ catalog, onAddCard, onCardClick }) {
               group={group}
               onAddCard={onAddCard}
               onCardClick={onCardClick}
+              onToggleWatch={onToggleWatch}
+              watchedIds={watchedIds}
               priceTier={priceTier}
             />
           ))}
@@ -1441,7 +1475,15 @@ function SearchView({ catalog, onAddCard, onCardClick }) {
       ) : (
         <div className="op-card-grid">
           {sorted.map(card => (
-            <CardTile key={card.id} card={card} onAddCard={onAddCard} onCardClick={onCardClick} priceTier={priceTier} />
+            <CardTile
+              key={card.id}
+              card={card}
+              onAddCard={onAddCard}
+              onCardClick={onCardClick}
+              onToggleWatch={onToggleWatch}
+              isWatched={watchedIds.has(card.id)}
+              priceTier={priceTier}
+            />
           ))}
         </div>
       )}
@@ -1576,7 +1618,7 @@ function SellModal({ entry, card, members = [], onClose, onSave }) {
 // for the most recent listing the scraper found (last_seen_*). When a scraper
 // pipeline lands later it just needs to call `updateWatchlistItem(id, {
 // last_checked_at, last_seen_url, last_seen_price, last_seen_source })`.
-function WatchView({ watchlist, catalogIndex, variantRev = 0, onCardClick, onRemove, onUpdate }) {
+function WatchView({ watchlist, catalogIndex, variantRev = 0, onCardClick, onBrowseCatalog = () => {}, onRemove, onUpdate }) {
   const [q, setQ] = useStoredState('optcg:watch:q', '');
 
   const enriched = useMemo(() => {
@@ -1602,6 +1644,9 @@ function WatchView({ watchlist, catalogIndex, variantRev = 0, onCardClick, onRem
             {watchlist.length.toLocaleString()} {watchlist.length === 1 ? 'card' : 'cards'} · scraper integration pending — last-seen fields will populate once it's wired up
           </div>
         </div>
+        <button className="op-btn-primary" onClick={onBrowseCatalog}>
+          <Plus size={16} /> Add Cards
+        </button>
       </div>
 
       <div className="op-search-bar op-search-bar-inline">
@@ -2307,7 +2352,7 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
   );
 }
 
-function SetGroup({ group, onAddCard, onCardClick, priceTier }) {
+function SetGroup({ group, onAddCard, onCardClick, onToggleWatch, watchedIds = new Set(), priceTier }) {
   const [collapsed, setCollapsed] = useState(false);
   return (
     <div className="op-set-group">
@@ -2320,7 +2365,15 @@ function SetGroup({ group, onAddCard, onCardClick, priceTier }) {
       {!collapsed && (
         <div className="op-card-grid">
           {group.cards.map(card => (
-            <CardTile key={card.id} card={card} onAddCard={onAddCard} onCardClick={onCardClick} priceTier={priceTier} />
+            <CardTile
+              key={card.id}
+              card={card}
+              onAddCard={onAddCard}
+              onCardClick={onCardClick}
+              onToggleWatch={onToggleWatch}
+              isWatched={watchedIds.has(card.id)}
+              priceTier={priceTier}
+            />
           ))}
         </div>
       )}
@@ -2328,7 +2381,7 @@ function SetGroup({ group, onAddCard, onCardClick, priceTier }) {
   );
 }
 
-function CardTile({ card, onAddCard, onCardClick, priceTier = 'raw' }) {
+function CardTile({ card, onAddCard, onCardClick, onToggleWatch = () => {}, isWatched = false, priceTier = 'raw' }) {
   const showTier = priceTier && priceTier !== 'raw';
   const tierMeta = PRICE_TIERS.find(t => t.value === priceTier);
   // Force re-read of the variant cache when this card's snapshot lands.
@@ -2366,9 +2419,18 @@ function CardTile({ card, onAddCard, onCardClick, priceTier = 'raw' }) {
           )}
         </div>
       </button>
-      <button className="op-card-tile-add" onClick={() => onAddCard(card)}>
-        <Plus size={14} /> Add to Collection
-      </button>
+      <div className="op-card-tile-actions">
+        <button className="op-card-tile-add" onClick={() => onAddCard(card)}>
+          <Plus size={14} /> Collection
+        </button>
+        <button
+          className={`op-card-tile-watch ${isWatched ? 'is-active' : ''}`}
+          onClick={() => onToggleWatch(card)}
+          title={isWatched ? 'Remove from watch list' : 'Add to watch list'}
+        >
+          {isWatched ? <EyeOff size={14} /> : <Eye size={14} />}
+        </button>
+      </div>
     </div>
   );
 }
