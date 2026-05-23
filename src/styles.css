@@ -716,6 +716,35 @@ body { background: var(--paper); }
 .op-search-bar-inline { margin: 14px 0 6px; }
 .op-search-bar-inline .op-search-input { font-size: 14px; padding: 10px 14px 10px 40px; }
 
+/* PSA CERT MODAL */
+.op-page-head-actions { display: flex; gap: 8px; }
+.op-cert-result { display: flex; flex-direction: column; gap: 12px; margin-top: 10px; }
+.op-cert-row { display: flex; gap: 10px; align-items: baseline; padding: 8px 12px; background: var(--paper-warm); border-left: 3px solid var(--jade); }
+.op-cert-label { font-family: var(--mono); font-size: 10px; font-weight: 600; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-soft); }
+.op-cert-val { font-family: var(--body); font-size: 13px; color: var(--ink); }
+.op-cert-match {
+  display: grid; grid-template-columns: 80px 1fr; gap: 14px;
+  padding: 12px; background: var(--paper); border: 1px solid var(--line-strong);
+}
+.op-cert-match-meta { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.op-cert-match-name {
+  font-family: var(--display); font-weight: 600; font-size: 17px;
+  display: flex; align-items: center; gap: 4px; min-width: 0;
+}
+.op-cert-match-sub { font-family: var(--mono); font-size: 11px; color: var(--ink-soft); }
+.op-cert-picker {
+  margin-top: 6px; display: flex; flex-direction: column; gap: 2px;
+  max-height: 240px; overflow-y: auto;
+  border: 1px solid var(--line); background: var(--paper);
+}
+.op-cert-pick {
+  text-align: left; padding: 6px 10px; background: transparent; border: none;
+  cursor: pointer; font-size: 12px; color: var(--ink);
+  border-bottom: 1px solid var(--line);
+}
+.op-cert-pick:hover { background: var(--paper-warm); }
+.op-cert-pick.is-active { background: var(--ink); color: var(--paper); }
+
 /* WATCH LIST */
 .op-watch-list { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; }
 .op-watch-row {

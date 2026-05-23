@@ -10,6 +10,7 @@ import {
   PRICE_TIERS, getCachedTierPrice, getCachedLoosePrice, isVariantSnapshotFresh, resolveVariantSnapshot,
   onVariantResolved, hydrateFromShared, subscribeResolutions,
 } from './grading.js';
+import { hasPsaToken, fetchCert, matchCatalogCard } from './psa.js';
 
 // Like useState, but persists to localStorage. `serialize`/`deserialize` are
 // optional escape hatches for non-JSON-friendly values (e.g. Sets).
@@ -125,6 +126,7 @@ export default function App() {
   const [addingCard, setAddingCard] = useState(null);
   const [editingEntry, setEditingEntry] = useState(null);
   const [sellingEntry, setSellingEntry] = useState(null);
+  const [addByCertOpen, setAddByCertOpen] = useState(false);
 
   // Load card catalog
   useEffect(() => {
@@ -403,6 +405,7 @@ export default function App() {
             catalogIndex={catalogIndex}
             variantRev={variantRev}
             onSearchClick={() => setView('search')}
+            onAddByCertClick={hasPsaToken() ? () => setAddByCertOpen(true) : null}
             onCardClick={(card) => setDetailCard(card)}
             onRemoveEntry={removeEntry}
             onSellEntry={(entry) => setSellingEntry(entry)}
@@ -479,6 +482,19 @@ export default function App() {
             }
             setAddingCard(null);
             setEditingEntry(null);
+          }}
+        />
+      )}
+
+      {addByCertOpen && (
+        <AddByCertModal
+          catalog={augmentedCatalog}
+          collections={collections}
+          activeCollectionId={isAllMode ? (collections[0]?.id || null) : activeCollectionId}
+          onClose={() => setAddByCertOpen(false)}
+          onSave={async (entry) => {
+            await addEntry(entry);
+            setAddByCertOpen(false);
           }}
         />
       )}
@@ -660,7 +676,7 @@ function ModeIndicator() {
 }
 
 // ============================================================================
-function CollectionView({ collection, entries, catalogIndex, variantRev = 0, onSearchClick, onCardClick, onRemoveEntry, onSellEntry = () => {}, onEditEntry = () => {}, onUpdateMembers }) {
+function CollectionView({ collection, entries, catalogIndex, variantRev = 0, onSearchClick, onAddByCertClick, onCardClick, onRemoveEntry, onSellEntry = () => {}, onEditEntry = () => {}, onUpdateMembers }) {
   const members = Array.isArray(collection?.members) ? collection.members : [];
   const isSynthetic = Boolean(collection?.synthetic);
   const [entrySort, setEntrySort] = useStoredState('optcg:collection:entrySort', 'recent');
@@ -745,9 +761,16 @@ function CollectionView({ collection, entries, catalogIndex, variantRev = 0, onS
           <h1 className="op-page-title">{collection?.name || 'No collection'}</h1>
           <div className="op-page-sub">{stats.count} {stats.count === 1 ? 'card' : 'cards'} logged in this collection</div>
         </div>
-        <button className="op-btn-primary" onClick={onSearchClick}>
-          <Plus size={16} /> Add Cards
-        </button>
+        <div className="op-page-head-actions">
+          {onAddByCertClick && (
+            <button className="op-btn-ghost" onClick={onAddByCertClick} title="Add a PSA-graded card by entering its cert number">
+              <Award size={15} /> Add by cert
+            </button>
+          )}
+          <button className="op-btn-primary" onClick={onSearchClick}>
+            <Plus size={16} /> Add Cards
+          </button>
+        </div>
       </div>
 
       {!isSynthetic && onUpdateMembers && (
@@ -1788,6 +1811,205 @@ function WatchRow({ w, card, onCardClick, onRemove, onUpdate }) {
       <button className="op-entry-remove" onClick={onRemove} title="Remove from watch list">
         <X size={15} />
       </button>
+    </div>
+  );
+}
+
+// ============================================================================
+// AddByCertModal: type a PSA cert number, we hit PSA's API, try to match the
+// result against the OPTCG catalog, then save the entry with grading fields
+// pre-filled. Falls back to a manual catalog picker if the auto-match misses.
+function AddByCertModal({ catalog, collections, activeCollectionId, onClose, onSave }) {
+  const [certNumber, setCertNumber] = useState('');
+  const [looking, setLooking] = useState(false);
+  const [error, setError] = useState('');
+  const [cert, setCert] = useState(null); // PSA cert payload (normalized)
+  const [matchedCard, setMatchedCard] = useState(null);
+  const [overrideCardId, setOverrideCardId] = useState(''); // when no auto-match
+  const [collectionId, setCollectionId] = useState(activeCollectionId || collections[0]?.id || null);
+  const [purchasePrice, setPurchasePrice] = useState('');
+  const [acquiredAt, setAcquiredAt] = useState(new Date().toISOString().slice(0, 10));
+  const [notes, setNotes] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  const collectionsList = collections.filter(c => c.id !== 'all');
+
+  const doLookup = async () => {
+    setError('');
+    setCert(null);
+    setMatchedCard(null);
+    setOverrideCardId('');
+    const cleaned = certNumber.trim();
+    if (!cleaned) { setError('Enter a cert number.'); return; }
+    setLooking(true);
+    try {
+      const result = await fetchCert(cleaned);
+      if (!result) {
+        setError(`PSA didn't find cert #${cleaned}.`);
+        return;
+      }
+      setCert(result);
+      const card = matchCatalogCard(result, catalog);
+      if (card) setMatchedCard(card);
+    } catch (e) {
+      setError(e.message || 'PSA lookup failed.');
+    } finally {
+      setLooking(false);
+    }
+  };
+
+  const card = matchedCard || (overrideCardId ? catalog.find(c => c.id === overrideCardId) : null);
+
+  const handleSave = async () => {
+    if (!cert || !card) return;
+    setSaving(true);
+    await onSave({
+      card_id: card.id,
+      collection_id: collectionId,
+      condition: 'Near Mint',
+      purchase_price: Number(purchasePrice) || 0,
+      contributions: [],
+      notes: notes.trim(),
+      acquired_at: acquiredAt || null,
+      grading_company: 'PSA',
+      grade: cert.grade,
+      bgs_black: false,
+      cert_number: cert.cert_number,
+      graded_price: 0,
+      pc_product_id: '',
+      pc_product_name: '',
+      price_source: '',
+      price_fetched_at: null,
+    });
+    setSaving(false);
+  };
+
+  // Manual catalog autocomplete when PSA's CardNumber doesn't match anything.
+  const [pickerQ, setPickerQ] = useState('');
+  const pickerResults = useMemo(() => {
+    const q = pickerQ.trim().toLowerCase();
+    if (!q || q.length < 2) return [];
+    return catalog
+      .filter(c => {
+        const hay = [c.name, c.fullName, c.id, c.displayId].filter(Boolean).join(' ').toLowerCase();
+        return hay.includes(q);
+      })
+      .slice(0, 8);
+  }, [catalog, pickerQ]);
+
+  return (
+    <div className="op-modal-backdrop" onClick={onClose}>
+      <div className="op-modal" onClick={(e) => e.stopPropagation()}>
+        <button className="op-modal-close" onClick={onClose}><X size={18} /></button>
+        <div className="op-modal-header">
+          <div>
+            <div className="op-eyebrow">PSA cert lookup</div>
+            <div className="op-modal-title">Add by cert number</div>
+            <div className="op-modal-sub">Pulls card + grade directly from PSA's API.</div>
+          </div>
+        </div>
+
+        <div className="op-form">
+          <Field label="PSA cert number">
+            <div className="op-variant-row">
+              <input
+                type="text"
+                inputMode="numeric"
+                placeholder="e.g. 12345678"
+                value={certNumber}
+                autoFocus
+                onChange={(e) => setCertNumber(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') doLookup(); }}
+              />
+              <button type="button" className="op-btn-ghost" onClick={doLookup} disabled={looking}>
+                {looking ? <Loader2 size={14} className="op-spin" /> : <Search size={14} />}
+                {looking ? 'Looking up…' : 'Look up'}
+              </button>
+            </div>
+          </Field>
+
+          {error && <div className="op-graded-error">{error}</div>}
+
+          {cert && (
+            <div className="op-cert-result">
+              <div className="op-cert-row">
+                <span className="op-cert-label">PSA says</span>
+                <span className="op-cert-val">
+                  {cert.subject || '(no subject)'} · {cert.grade_description || (cert.grade != null ? `Grade ${cert.grade}` : '?')}
+                  {cert.card_number && <> · {cert.card_number}</>}
+                </span>
+              </div>
+
+              {matchedCard ? (
+                <div className="op-cert-match">
+                  <CardArt card={matchedCard} />
+                  <div className="op-cert-match-meta">
+                    <div className="op-eyebrow">Matched catalog card</div>
+                    <div className="op-cert-match-name">
+                      {matchedCard.name}
+                      <VariantPill variant={matchedCard.variant} />
+                    </div>
+                    <div className="op-cert-match-sub">
+                      {matchedCard.displayId || matchedCard.id} · {matchedCard.setName} · {RARITY_LABELS[matchedCard.rarity] || matchedCard.rarity}
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="op-graded-caveat">
+                  PSA returned card number <strong>{cert.card_number || '?'}</strong> but it didn't match anything in your catalog. Pick the right card below.
+                  <div style={{ marginTop: 8 }}>
+                    <input
+                      type="text"
+                      placeholder="Search catalog by name or ID…"
+                      value={pickerQ}
+                      onChange={(e) => setPickerQ(e.target.value)}
+                      style={{ width: '100%', padding: '6px 10px', border: '1px solid var(--line-strong)', background: 'var(--paper)' }}
+                    />
+                    {pickerResults.length > 0 && (
+                      <div className="op-cert-picker">
+                        {pickerResults.map(c => (
+                          <button
+                            key={c.id}
+                            className={`op-cert-pick ${overrideCardId === c.id ? 'is-active' : ''}`}
+                            onClick={() => { setOverrideCardId(c.id); setPickerQ(`${c.displayId || c.id} ${c.name}`); }}
+                          >
+                            <span className="op-entry-id">{c.displayId || c.id}</span> {c.name} · {c.setName}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              <div className="op-form-row">
+                <Field label="Collection">
+                  <select value={collectionId || ''} onChange={(e) => setCollectionId(e.target.value)}>
+                    {collectionsList.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                  </select>
+                </Field>
+                <Field label="Total paid (USD)">
+                  <input type="number" step="0.01" placeholder="0.00" value={purchasePrice} onChange={(e) => setPurchasePrice(e.target.value)} />
+                </Field>
+                <Field label="Date acquired">
+                  <input type="date" value={acquiredAt} onChange={(e) => setAcquiredAt(e.target.value)} />
+                </Field>
+              </div>
+
+              <Field label="Notes (optional)">
+                <textarea rows={2} value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Where bought, condition notes, etc." />
+              </Field>
+
+              <div className="op-form-actions">
+                <button className="op-btn-ghost" onClick={onClose} disabled={saving}>Cancel</button>
+                <button className="op-btn-primary" onClick={handleSave} disabled={saving || !card || cert.grade == null}>
+                  {saving ? 'Saving…' : 'Save to Collection'}
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
