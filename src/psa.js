@@ -84,6 +84,24 @@ const extractOptcgIds = (s) => {
   return ids;
 };
 
+// Set-prefix only: PSA's Brand often reads "ONE PIECE OP11-A FIST OF DIVINE
+// SPEED" — the set is OP11 but it's followed by "-A" instead of a card number,
+// so the full-ID regex above misses it. We pair these with PSA's CardNumber
+// digits to reconstruct full ids.
+const SET_PREFIX_RE = /\b(OP|ST|EB|PRB)\s*[- ]?\s*(\d{1,2})\b/gi;
+const extractSetIds = (s) => {
+  if (!s) return [];
+  const sets = [];
+  const text = String(s).toUpperCase();
+  let m;
+  SET_PREFIX_RE.lastIndex = 0;
+  while ((m = SET_PREFIX_RE.exec(text)) !== null) {
+    const [, prefix, setNum] = m;
+    sets.push(`${prefix}${setNum.padStart(2, '0')}`);
+  }
+  return sets;
+};
+
 const norm = (s) => (s || '').toString().toUpperCase().replace(/[\s_]/g, '');
 
 // Heuristic match: find the OPTCG catalog card that corresponds to the PSA
@@ -95,11 +113,25 @@ export const matchCatalogCard = (cert, catalog) => {
 
   // 1. Collect every candidate OPTCG id we can extract from the PSA payload.
   const candidates = new Set();
-  for (const field of [cert.card_number, cert.subject, cert.brand, cert.raw?.VarietyPedigree, cert.raw?.Subject, cert.raw?.Brand, cert.raw?.CardNumber]) {
+  const textFields = [cert.card_number, cert.subject, cert.brand, cert.category, cert.raw?.VarietyPedigree, cert.raw?.Subject, cert.raw?.Brand, cert.raw?.Category, cert.raw?.CardNumber];
+  for (const field of textFields) {
     for (const id of extractOptcgIds(field)) candidates.add(id);
   }
   // Also try the raw card_number as a normalized direct match.
   if (cert.card_number) candidates.add(norm(cert.card_number).replace(/-/g, '').replace(/^(OP|ST|EB|PRB)(\d+)(\d{3})$/i, '$1$2-$3'));
+
+  // Reconstruct full ids by pairing any standalone set prefixes (e.g. "OP11"
+  // from Brand="ONE PIECE OP11-A FIST OF DIVINE SPEED") with the trailing
+  // CardNumber digits. This is the common PSA format for One Piece certs.
+  const numDigits = cert.card_number ? String(cert.card_number).match(/(\d+)/)?.[1] : null;
+  if (numDigits) {
+    const paddedNum = numDigits.padStart(3, '0');
+    const setIds = new Set();
+    for (const field of textFields) {
+      for (const s of extractSetIds(field)) setIds.add(s);
+    }
+    for (const s of setIds) candidates.add(`${s}-${paddedNum}`);
+  }
 
   // 2. Build a quick lookup table over the catalog using multiple key forms.
   const byKey = new Map();
