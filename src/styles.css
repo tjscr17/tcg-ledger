@@ -798,6 +798,13 @@ body { background: var(--paper); }
 }
 .op-cert-pick:hover { background: var(--paper-warm); }
 .op-cert-pick.is-active { background: var(--ink); color: var(--paper); }
+.op-cert-candidates {
+  margin-top: 6px; display: flex; flex-wrap: wrap; gap: 4px;
+}
+.op-cert-candidates .op-cert-pick {
+  border: 1px solid var(--line-strong);
+  padding: 4px 8px; font-size: 11px;
+}
 
 /* WATCH LIST */
 .op-watch-list { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; }

@@ -10,7 +10,7 @@ import {
   PRICE_TIERS, getCachedTierPrice, getCachedLoosePrice, isVariantSnapshotFresh, resolveVariantSnapshot,
   onVariantResolved, hydrateFromShared, subscribeResolutions,
 } from './grading.js';
-import { hasPsaToken, fetchCert, matchCatalogCard } from './psa.js';
+import { hasPsaToken, fetchCert, matchCatalogCard, findCandidateCards } from './psa.js';
 
 // Like useState, but persists to localStorage. `serialize`/`deserialize` are
 // optional escape hatches for non-JSON-friendly values (e.g. Sets).
@@ -1911,7 +1911,8 @@ function AddByCertModal({ catalog, collections, activeCollectionId, onClose, onS
   const [looking, setLooking] = useState(false);
   const [error, setError] = useState('');
   const [cert, setCert] = useState(null); // PSA cert payload (normalized)
-  const [matchedCard, setMatchedCard] = useState(null);
+  const [candidates, setCandidates] = useState([]); // all catalog cards sharing the matched displayId
+  const [selectedCardId, setSelectedCardId] = useState(''); // which candidate the user picked
   const [overrideCardId, setOverrideCardId] = useState(''); // when no auto-match
   const [collectionId, setCollectionId] = useState(activeCollectionId || collections[0]?.id || null);
   const [purchasePrice, setPurchasePrice] = useState('');
@@ -1924,7 +1925,8 @@ function AddByCertModal({ catalog, collections, activeCollectionId, onClose, onS
   const doLookup = async () => {
     setError('');
     setCert(null);
-    setMatchedCard(null);
+    setCandidates([]);
+    setSelectedCardId('');
     setOverrideCardId('');
     const cleaned = certNumber.trim();
     if (!cleaned) { setError('Enter a cert number.'); return; }
@@ -1936,8 +1938,9 @@ function AddByCertModal({ catalog, collections, activeCollectionId, onClose, onS
         return;
       }
       setCert(result);
-      const card = matchCatalogCard(result, catalog);
-      if (card) setMatchedCard(card);
+      const cands = findCandidateCards(result, catalog);
+      setCandidates(cands);
+      if (cands.length > 0) setSelectedCardId(cands[0].id);
     } catch (e) {
       setError(e.message || 'PSA lookup failed.');
     } finally {
@@ -1945,6 +1948,7 @@ function AddByCertModal({ catalog, collections, activeCollectionId, onClose, onS
     }
   };
 
+  const matchedCard = candidates.find(c => c.id === selectedCardId) || candidates[0] || null;
   const card = matchedCard || (overrideCardId ? catalog.find(c => c.id === overrideCardId) : null);
 
   const handleSave = async () => {
@@ -2043,7 +2047,9 @@ function AddByCertModal({ catalog, collections, activeCollectionId, onClose, onS
                 <div className="op-cert-match">
                   <CardArt card={matchedCard} />
                   <div className="op-cert-match-meta">
-                    <div className="op-eyebrow">Matched catalog card</div>
+                    <div className="op-eyebrow">
+                      {candidates.length > 1 ? `Pick the right printing (${candidates.length})` : 'Matched catalog card'}
+                    </div>
                     <div className="op-cert-match-name">
                       {matchedCard.name}
                       <VariantPill variant={matchedCard.variant} />
@@ -2051,6 +2057,24 @@ function AddByCertModal({ catalog, collections, activeCollectionId, onClose, onS
                     <div className="op-cert-match-sub">
                       {matchedCard.displayId || matchedCard.id} · {matchedCard.setName} · {RARITY_LABELS[matchedCard.rarity] || matchedCard.rarity}
                     </div>
+                    {candidates.length > 1 && (
+                      <div className="op-cert-candidates">
+                        {candidates.map(c => (
+                          <button
+                            key={c.id}
+                            type="button"
+                            className={`op-cert-pick ${selectedCardId === c.id ? 'is-active' : ''}`}
+                            onClick={() => setSelectedCardId(c.id)}
+                            title={c.fullName || c.name}
+                          >
+                            {c.variant
+                              ? <><span className="op-entry-id">{c.displayId || c.id}</span> {c.variant}</>
+                              : <><span className="op-entry-id">{c.displayId || c.id}</span> {c.isParallel ? 'Parallel' : 'Base'}</>}
+                            {' · '}{RARITY_LABELS[c.rarity] || c.rarity}
+                          </button>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 </div>
               ) : (

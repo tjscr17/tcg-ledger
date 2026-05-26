@@ -204,3 +204,17 @@ export const matchCatalogCard = (cert, catalog) => {
   }
   return match;
 };
+
+// Like matchCatalogCard but returns every printing that shares the resolved
+// display id (base + parallels + alt-arts) so the caller can present a picker.
+// Order: best-guess first (mirrors matchCatalogCard), then siblings.
+export const findCandidateCards = (cert, catalog) => {
+  const primary = matchCatalogCard(cert, catalog);
+  if (!primary) return [];
+  const targetDisplay = (primary.displayId || primary.id || '').toUpperCase();
+  const siblings = catalog.filter(c => (c.displayId || c.id || '').toUpperCase() === targetDisplay);
+  if (siblings.length === 0) return [primary];
+  // Pin the primary at index 0, keep the rest in catalog order.
+  const rest = siblings.filter(c => c.id !== primary.id);
+  return [primary, ...rest];
+};
