@@ -956,7 +956,7 @@ function EquityPanel({ entries, transactions = [], catalogIndex, totalMarket, co
     // Build a per-tx signed contribution iterator. Sign convention:
     //   buy / expense: contributors put money in (positive = money in)
     //   sell:          contributors took proceeds out (positive = money out)
-    //   transfer:      contributions are already signed (negative = sender, positive = receiver)
+    //   transfer:      contributions are already signed (positive = sender, negative = receiver)
     const signedContribsOf = (tx) => {
       const list = Array.isArray(tx.contributions) ? tx.contributions : [];
       return list.flatMap(c => {
@@ -2120,9 +2120,11 @@ function TransferModal({ members = [], collection, onClose, onSave }) {
       card_display_name: `Transfer · ${fromName} → ${toName}`,
       type: 'transfer',
       amount: amt,
+      // Sign convention: sender is positive (money provided), receiver is
+      // negative (money taken). The EquityPanel reads these as-is.
       contributions: [
-        { name: fromName.trim(), amount: -amt },
-        { name: toName.trim(), amount: amt },
+        { name: fromName.trim(), amount: amt },
+        { name: toName.trim(), amount: -amt },
       ],
       occurred_at: date || null,
       notes: notes.trim(),
