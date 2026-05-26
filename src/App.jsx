@@ -263,8 +263,12 @@ export default function App() {
       added_at: new Date().toISOString(),
     });
     if (created) {
-      setEntries([...entries, created]);
+      setEntries(prev => [...prev, created]);
       logTransaction({ type: 'buy', entry: created });
+    } else {
+      // shared.insert returned null — Supabase rejected the row. Surface it
+      // so the user notices instead of silently swallowing the failure.
+      alert("Couldn't save the entry. Check the console for the Supabase error — most likely a missing column. See storage.js for the migration SQL.");
     }
   };
 
