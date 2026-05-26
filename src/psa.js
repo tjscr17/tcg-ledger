@@ -2,15 +2,16 @@
 // PSA Public API client — cert lookup by cert number.
 //
 // Auth: 40-char Bearer token. Sign up at https://www.psacard.com/publicapi
-// then set VITE_PSA_TOKEN in .env.local.
+// then set VITE_PSA_TOKEN in .env.local (and in Vercel project env vars for
+// deployed builds).
 //
-// One known wrinkle: PSA's public API may not allow direct browser (CORS)
-// requests. If you hit "Failed to fetch" in production, route through a
-// tiny serverless proxy (Vercel function, Cloudflare Worker, etc.) and
-// rewrite API_BASE to point at it.
+// PSA's public API does not allow direct browser CORS requests, so all calls
+// route through /api/psa — a Vercel serverless function in production, and a
+// Vite dev middleware locally (both defined alongside this file). The token
+// is read server-side and never sent from the browser; VITE_PSA_TOKEN here is
+// only used as a feature-enabled flag in the UI.
 // ============================================================================
 
-const API_BASE = 'https://api.psacard.com/publicapi/cert';
 const TOKEN = import.meta.env.VITE_PSA_TOKEN;
 
 export const hasPsaToken = () => Boolean(TOKEN);
@@ -28,12 +29,17 @@ const parseGrade = (s) => {
 
 // Fetch a PSA cert by its cert number. Returns a normalized object on
 // success or null if the cert isn't found. Throws on auth/network errors.
+// Routes through /api/psa to dodge PSA's CORS block on browser callers.
 export const fetchCert = async (certNumber) => {
   if (!TOKEN) throw new Error('PSA token missing — set VITE_PSA_TOKEN in .env.local');
-  const url = `${API_BASE}/GetByCertNumber/${encodeURIComponent(String(certNumber).trim())}`;
-  const res = await fetch(url, { headers: { Authorization: `Bearer ${TOKEN}` } });
+  const url = `/api/psa?cert=${encodeURIComponent(String(certNumber).trim())}`;
+  const res = await fetch(url);
   if (res.status === 404) return null;
-  if (!res.ok) throw new Error(`PSA API returned ${res.status}`);
+  if (!res.ok) {
+    let detail = '';
+    try { detail = (await res.json())?.error || ''; } catch {}
+    throw new Error(`PSA proxy returned ${res.status}${detail ? `: ${detail}` : ''}`);
+  }
   const json = await res.json();
   const cert = json?.PSACert;
   if (!cert) return null;
