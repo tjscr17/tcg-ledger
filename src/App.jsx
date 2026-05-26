@@ -2324,6 +2324,239 @@ function ExpenseModal({ members = [], collection, card = null, entry = null, onC
 }
 
 // ============================================================================
+// BulkGradingModal: select N entries, give each a grading cost, and split the
+// total among payers. Saves one expense tx per card, with payer shares scaled
+// proportionally so per-card contribs sum to the per-card cost.
+function BulkGradingModal({ entries, catalogIndex, members = [], collectionId, onClose, onSave }) {
+  const [selected, setSelected] = useState({}); // entry_id -> cost (string)
+  const [payers, setPayers] = useState([{ name: '', amount: '' }]);
+  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
+  const [notes, setNotes] = useState('');
+  const [search, setSearch] = useState('');
+  const [defaultCost, setDefaultCost] = useState('15');
+  const [saving, setSaving] = useState(false);
+
+  // Only entries with a known card and within scope are gradable.
+  const scoped = useMemo(() => {
+    const list = (!collectionId || collectionId === 'all')
+      ? entries
+      : entries.filter(e => e.collection_id === collectionId);
+    return list.filter(e => catalogIndex.get(e.card_id));
+  }, [entries, catalogIndex, collectionId]);
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return scoped;
+    return scoped.filter(e => {
+      const c = catalogIndex.get(e.card_id);
+      const hay = [c?.name, c?.fullName, c?.id, c?.displayId, c?.setName].filter(Boolean).join(' ').toLowerCase();
+      return hay.includes(q);
+    });
+  }, [scoped, catalogIndex, search]);
+
+  const toggle = (entryId) => setSelected(prev => {
+    const next = { ...prev };
+    if (entryId in next) delete next[entryId];
+    else next[entryId] = defaultCost;
+    return next;
+  });
+  const setCost = (entryId, cost) => setSelected(prev => ({ ...prev, [entryId]: cost }));
+
+  const addPayer = () => setPayers([...payers, { name: '', amount: '' }]);
+  const updatePayer = (i, patch) => setPayers(payers.map((p, idx) => idx === i ? { ...p, ...patch } : p));
+  const removePayer = (i) => setPayers(payers.filter((_, idx) => idx !== i));
+
+  const totalCost = Object.values(selected).reduce((s, v) => s + (Number(v) || 0), 0);
+  const totalPaid = payers.reduce((s, p) => s + (Number(p.amount) || 0), 0);
+  const mismatch = Math.abs(totalCost - totalPaid) > 0.01;
+  const numCards = Object.keys(selected).length;
+  const validPayers = payers.filter(p => p.name.trim() && Number(p.amount) > 0);
+  const valid = numCards > 0 && totalCost > 0 && !mismatch && validPayers.length > 0;
+
+  const splitEvenly = () => {
+    const names = payers.filter(p => p.name.trim()).map(p => p.name.trim());
+    if (names.length === 0) return;
+    const share = totalCost / names.length;
+    setPayers(names.map(n => ({ name: n, amount: share.toFixed(2) })));
+  };
+
+  const handleSave = async () => {
+    if (!valid) return;
+    setSaving(true);
+    for (const [entryId, costStr] of Object.entries(selected)) {
+      const entry = scoped.find(e => e.id === entryId);
+      const card = catalogIndex.get(entry?.card_id);
+      if (!entry || !card) continue;
+      const cardCost = Number(costStr) || 0;
+      if (cardCost === 0) continue;
+      // Scale each payer's share to this card by the cost ratio.
+      const cardContribs = validPayers.map(p => ({
+        name: p.name.trim(),
+        amount: cardCost * ((Number(p.amount) || 0) / totalPaid),
+      }));
+      await onSave({
+        type: 'expense',
+        card_id: card.id,
+        entry_id: entry.id,
+        collection_id: entry.collection_id,
+        card_display_name: `Grading · ${card.displayId || card.id} ${card.name}`,
+        amount: cardCost,
+        contributions: cardContribs,
+        occurred_at: date || null,
+        notes: notes.trim(),
+      });
+    }
+    setSaving(false);
+    onClose();
+  };
+
+  return (
+    <div className="op-modal-backdrop" onClick={onClose}>
+      <div className="op-modal op-modal-wide" onClick={(e) => e.stopPropagation()}>
+        <button className="op-modal-close" onClick={onClose}><X size={18} /></button>
+        <div className="op-modal-header">
+          <div>
+            <div className="op-eyebrow">Bulk submission</div>
+            <div className="op-modal-title">Bulk grading</div>
+            <div className="op-modal-sub">
+              Pick the cards going to grading, set each card's fee, and split the bill across payers.
+              One expense tx per card, scaled proportionally.
+            </div>
+          </div>
+        </div>
+
+        <div className="op-form">
+          <div className="op-form-row">
+            <Field label="Default cost per card">
+              <input
+                type="number" step="0.01" placeholder="15.00"
+                value={defaultCost}
+                onChange={(e) => setDefaultCost(e.target.value)}
+              />
+            </Field>
+            <Field label="Date">
+              <input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+            </Field>
+          </div>
+
+          <div className="op-form-section">
+            <div className="op-form-section-head">
+              <div>
+                <div className="op-form-section-title">Cards in this submission ({numCards})</div>
+                <div className="op-form-section-sub">Click a card to add it. Edit per-card cost in the table.</div>
+              </div>
+            </div>
+
+            <div className="op-search-bar op-search-bar-inline">
+              <Search size={16} className="op-search-icon" />
+              <input
+                className="op-search-input"
+                placeholder="Filter cards by name, ID, set…"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+              />
+              {search && (
+                <button className="op-search-clear" onClick={() => setSearch('')}>
+                  <X size={15} />
+                </button>
+              )}
+            </div>
+
+            {scoped.length === 0 ? (
+              <div className="op-empty-mini">No entries in the current scope to grade.</div>
+            ) : (
+              <div className="op-bulk-list">
+                {filtered.map(entry => {
+                  const card = catalogIndex.get(entry.card_id);
+                  const isSelected = entry.id in selected;
+                  const cost = selected[entry.id] ?? '';
+                  return (
+                    <div key={entry.id} className={`op-bulk-row ${isSelected ? 'is-selected' : ''}`}>
+                      <label className="op-bulk-row-main">
+                        <input
+                          type="checkbox"
+                          checked={isSelected}
+                          onChange={() => toggle(entry.id)}
+                        />
+                        <div className="op-bulk-row-info">
+                          <div className="op-bulk-row-name">
+                            {card.name}
+                            <VariantPill variant={card.variant} />
+                          </div>
+                          <div className="op-bulk-row-meta">
+                            {card.displayId || card.id} · {entry.condition || 'raw'}
+                            {entry.grading_company && ` · already ${entry.grading_company} ${entry.grade}`}
+                          </div>
+                        </div>
+                      </label>
+                      {isSelected && (
+                        <div className="op-bulk-row-cost">
+                          <DollarSign size={13} />
+                          <input
+                            type="number" step="0.01" placeholder="0.00"
+                            value={cost}
+                            onChange={(e) => setCost(entry.id, e.target.value)}
+                          />
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+                {filtered.length === 0 && (
+                  <div className="op-empty-mini">No cards match your filter.</div>
+                )}
+              </div>
+            )}
+
+            <div className="op-bulk-total">
+              Submission total: <strong>${totalCost.toFixed(2)}</strong>
+              {numCards > 0 && <> · {numCards} {numCards === 1 ? 'card' : 'cards'}</>}
+            </div>
+          </div>
+
+          <div className="op-form-section">
+            <div className="op-form-section-head">
+              <div>
+                <div className="op-form-section-title">Who's paying</div>
+                <div className="op-form-section-sub">Splits get scaled per card so each card's contribs match its cost.</div>
+              </div>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button className="op-btn-ghost" onClick={splitEvenly} disabled={totalCost === 0}>Split evenly</button>
+                <button className="op-btn-ghost" onClick={addPayer}><Plus size={14} /> Add payer</button>
+              </div>
+            </div>
+            {payers.map((p, i) => (
+              <ContribRow
+                key={i}
+                value={p}
+                members={members}
+                onChange={(patch) => updatePayer(i, patch)}
+                onRemove={() => removePayer(i)}
+              />
+            ))}
+            <div className={`op-contrib-check ${mismatch ? 'is-warn' : 'is-ok'}`}>
+              Payer total: <strong>${totalPaid.toFixed(2)}</strong> of <strong>${totalCost.toFixed(2)}</strong>
+              {mismatch && totalCost > 0 && <span> · doesn't match submission total</span>}
+            </div>
+          </div>
+
+          <Field label="Notes (optional)">
+            <textarea rows={2} value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Submission #, service level, etc." />
+          </Field>
+
+          <div className="op-form-actions">
+            <button className="op-btn-ghost" onClick={onClose} disabled={saving}>Cancel</button>
+            <button className="op-btn-primary" onClick={handleSave} disabled={saving || !valid}>
+              {saving ? 'Saving…' : `Log ${numCards || ''} ${numCards === 1 ? 'expense' : 'expenses'}`.trim()}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================================
 function TransactionsView({ transactions, collections, entries = [], catalogIndex = new Map(), variantRev = 0, activeCollectionId, onLogTransaction = () => {}, onRemoveTransaction = () => {} }) {
   const [typeFilter, setTypeFilter] = useState('all'); // 'all' | 'buy' | 'sell' | 'transfer' | 'expense'
   // Default the transactions view to the active collection — most users want
@@ -2335,7 +2568,7 @@ function TransactionsView({ transactions, collections, entries = [], catalogInde
   useEffect(() => {
     if (activeCollectionId) setCollectionFilter(activeCollectionId);
   }, [activeCollectionId]);
-  const [modal, setModal] = useState(null); // 'transfer' | 'expense' | null
+  const [modal, setModal] = useState(null); // 'transfer' | 'expense' | 'bulkgrade' | null
 
   const collectionsById = useMemo(() => {
     const m = new Map();
@@ -2448,6 +2681,7 @@ function TransactionsView({ transactions, collections, entries = [], catalogInde
           <div className="op-filter-pills">
             <button className="op-filter-pill" onClick={() => setModal('transfer')}>+ Transfer</button>
             <button className="op-filter-pill" onClick={() => setModal('expense')}>+ Expense</button>
+            <button className="op-filter-pill" onClick={() => setModal('bulkgrade')}>+ Bulk grade</button>
           </div>
         </div>
       </div>
@@ -2475,6 +2709,19 @@ function TransactionsView({ transactions, collections, entries = [], catalogInde
             const normalized = { ...payload, collection_id: payload.collection_id === 'all' ? null : payload.collection_id };
             await onLogTransaction(normalized);
             setModal(null);
+          }}
+        />
+      )}
+      {modal === 'bulkgrade' && (
+        <BulkGradingModal
+          entries={entries}
+          catalogIndex={catalogIndex}
+          members={equityMembers}
+          collectionId={collectionFilter}
+          onClose={() => setModal(null)}
+          onSave={async (payload) => {
+            const normalized = { ...payload, collection_id: payload.collection_id === 'all' ? null : payload.collection_id };
+            await onLogTransaction(normalized);
           }}
         />
       )}
