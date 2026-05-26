@@ -288,6 +288,10 @@ body { background: var(--paper); }
   text-transform: uppercase; letter-spacing: 0.16em; color: var(--ink-soft); margin-bottom: 3px;
 }
 .op-entry-cell-val { font-size: 13px; font-weight: 500; }
+.op-entry-cell-sub {
+  font-family: var(--mono); font-size: 9px; color: var(--ink-soft);
+  margin-top: 2px; white-space: nowrap;
+}
 .op-entry-delta {
   display: inline-flex; align-items: center; gap: 5px;
   font-family: var(--mono); font-size: 13px; font-weight: 700;
@@ -864,14 +868,23 @@ body { background: var(--paper); }
 
 /* TRANSACTIONS VIEW + SELL BUTTON */
 .op-entry-sell:hover { background: var(--jade); color: var(--paper); border-color: var(--jade); }
+.op-entry-expense:hover { background: var(--rust); color: var(--paper); border-color: var(--rust); }
 
 .op-tx-list { display: flex; flex-direction: column; gap: 8px; margin-top: 20px; }
 .op-tx-row {
-  display: grid; grid-template-columns: 70px 1fr auto; gap: 16px; align-items: center;
+  display: grid; grid-template-columns: 70px 1fr auto auto; gap: 16px; align-items: center;
   padding: 12px 16px;
   background: var(--paper); border: 1px solid var(--line-strong);
   border-left-width: 4px;
 }
+.op-tx-delete {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 30px; height: 30px;
+  background: transparent; border: 1px solid var(--line-strong);
+  color: var(--ink-soft); cursor: pointer;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+.op-tx-delete:hover { color: var(--paper); background: var(--berry-deep); border-color: var(--berry-deep); }
 .op-tx-row.is-buy { border-left-color: var(--berry); }
 .op-tx-row.is-sell { border-left-color: var(--jade); }
 .op-tx-row.is-transfer { border-left-color: var(--gold); }
@@ -895,8 +908,9 @@ body { background: var(--paper); }
 .op-tx-amount.is-neg { color: var(--berry-deep); }
 
 @media (max-width: 700px) {
-  .op-tx-row { grid-template-columns: auto 1fr; }
+  .op-tx-row { grid-template-columns: auto 1fr auto; }
   .op-tx-amount { grid-column: 2; justify-self: end; }
+  .op-tx-delete { grid-column: 3; }
 }
 
 /* EQUITY PANEL */

@@ -127,6 +127,7 @@ export default function App() {
   const [editingEntry, setEditingEntry] = useState(null);
   const [sellingEntry, setSellingEntry] = useState(null);
   const [addByCertOpen, setAddByCertOpen] = useState(false);
+  const [expenseForEntry, setExpenseForEntry] = useState(null); // entry object
 
   // Load card catalog
   useEffect(() => {
@@ -279,14 +280,14 @@ export default function App() {
     setEntries(entries.map(e => e.id === id ? updated : e));
 
     // If the user moved the entry to a different collection, drag its buy
-    // transactions along so the capital allocation follows the card. Match
-    // by entry_id (set on tx insert) when available, otherwise fall back to
-    // card_id + occurred_at heuristic for legacy buy txs.
+    // and card-scoped expense transactions along so the capital allocation
+    // follows the card. Match by entry_id when available, otherwise fall
+    // back to card_id + occurred_at heuristic for legacy buy txs.
     if (before && patch.collection_id && patch.collection_id !== before.collection_id) {
       const oldDate = (before.acquired_at || (before.added_at || '').slice(0, 10) || '').slice(0, 10);
       const linked = transactions.filter(t => {
+        if (t.entry_id === id) return true;
         if (t.type !== 'buy') return false;
-        if (t.entry_id) return t.entry_id === id;
         if (t.collection_id !== before.collection_id) return false;
         if (t.card_id !== before.card_id) return false;
         const txDate = (t.occurred_at || '').slice(0, 10);
@@ -304,22 +305,23 @@ export default function App() {
 
   // Cleanup removal — used for mis-logged entries (and orphan rows where
   // there's not enough info to record a sell). Also nukes any matching buy
-  // tx so the equity panel rebalances as if the entry never existed. The
-  // Sell flow remains the normal path for actual divestments.
+  // tx and any card-scoped expense txs (grading fees, etc.) so the equity
+  // panel rebalances as if the entry never existed. The Sell flow remains
+  // the normal path for actual divestments.
   const removeEntry = async (id) => {
     const before = entries.find(e => e.id === id);
     await store.remove('entries', id);
     setEntries(entries.filter(e => e.id !== id));
     if (!before) return;
     const oldDate = (before.acquired_at || (before.added_at || '').slice(0, 10) || '').slice(0, 10);
-    const linkedBuys = transactions.filter(t => {
+    const linkedTxs = transactions.filter(t => {
+      if (t.entry_id === id) return true;
       if (t.type !== 'buy') return false;
-      if (t.entry_id) return t.entry_id === id;
       if (t.collection_id !== before.collection_id) return false;
       if (t.card_id !== before.card_id) return false;
       return (t.occurred_at || '').slice(0, 10) === oldDate;
     });
-    for (const tx of linkedBuys) {
+    for (const tx of linkedTxs) {
       await store.remove('transactions', tx.id);
       setTransactions(prev => prev.filter(t => t.id !== tx.id));
     }
@@ -358,6 +360,17 @@ export default function App() {
     await logTransaction({ type: 'sell', entry, sale });
     await store.remove('entries', id);
     setEntries(entries.filter(e => e.id !== id));
+    // Don't delete linked card-expense txs — they're part of the cost-basis
+    // story that the equity panel still needs to attribute capital correctly.
+    // The entry is gone but the historical expense remains in the ledger.
+  };
+
+  // Manual transaction removal. Used to clean up mis-logged transfers/expenses
+  // (or buys/sells the user wants to scrub). For buy/sell rows this leaves the
+  // underlying entry alone — only the equity bookkeeping is undone.
+  const removeTransaction = async (id) => {
+    await store.remove('transactions', id);
+    setTransactions(prev => prev.filter(t => t.id !== id));
   };
 
   // 'all' is a synthetic collection that aggregates entries/transactions
@@ -406,6 +419,7 @@ export default function App() {
           <CollectionView
             collection={activeCollection}
             entries={activeEntries}
+            transactions={transactions}
             catalogIndex={catalogIndex}
             variantRev={variantRev}
             onSearchClick={() => setView('search')}
@@ -413,6 +427,7 @@ export default function App() {
             onCardClick={(card) => setDetailCard(card)}
             onRemoveEntry={removeEntry}
             onSellEntry={(entry) => setSellingEntry(entry)}
+            onExpenseEntry={(entry) => setExpenseForEntry(entry)}
             onUpdateMembers={isAllMode ? null : (members) => updateMembers(activeCollection.id, members)}
             onEditEntry={(entry) => {
               const card = catalogIndex.get(entry.card_id);
@@ -465,7 +480,9 @@ export default function App() {
             onLogTransaction={async (tx) => {
               const created = await store.insert('transactions', { id: uid(), ...tx, created_at: new Date().toISOString() });
               if (created) setTransactions(prev => [...prev, created]);
+              else alert("Couldn't save the transaction. Check the console for the Supabase error.");
             }}
+            onRemoveTransaction={removeTransaction}
           />
         )}
       </main>
@@ -515,6 +532,26 @@ export default function App() {
           }}
         />
       )}
+
+      {expenseForEntry && (() => {
+        const c = collections.find(col => col.id === expenseForEntry.collection_id);
+        const members = Array.isArray(c?.members) ? c.members : [];
+        return (
+          <ExpenseModal
+            card={catalogIndex.get(expenseForEntry.card_id)}
+            entry={expenseForEntry}
+            collection={c}
+            members={members}
+            onClose={() => setExpenseForEntry(null)}
+            onSave={async (tx) => {
+              const created = await store.insert('transactions', { id: uid(), ...tx, created_at: new Date().toISOString() });
+              if (created) setTransactions(prev => [...prev, created]);
+              else alert("Couldn't save the expense. Check the console for the Supabase error.");
+              setExpenseForEntry(null);
+            }}
+          />
+        );
+      })()}
 
       {detailCard && (
         <CardDetailDrawer
@@ -680,11 +717,23 @@ function ModeIndicator() {
 }
 
 // ============================================================================
-function CollectionView({ collection, entries, catalogIndex, variantRev = 0, onSearchClick, onAddByCertClick, onCardClick, onRemoveEntry, onSellEntry = () => {}, onEditEntry = () => {}, onUpdateMembers }) {
+function CollectionView({ collection, entries, transactions = [], catalogIndex, variantRev = 0, onSearchClick, onAddByCertClick, onCardClick, onRemoveEntry, onSellEntry = () => {}, onExpenseEntry = () => {}, onEditEntry = () => {}, onUpdateMembers }) {
   const members = Array.isArray(collection?.members) ? collection.members : [];
   const isSynthetic = Boolean(collection?.synthetic);
   const [entrySort, setEntrySort] = useStoredState('optcg:collection:entrySort', 'recent');
   const [colQ, setColQ] = useStoredState('optcg:collection:q', '');
+
+  // Per-entry expense sum (card-scoped expense txs linked via entry_id). Used
+  // for cost-basis display so grading/shipping/etc costs roll into the entry's
+  // effective "Paid" total.
+  const expensesByEntry = useMemo(() => {
+    const m = new Map();
+    for (const t of transactions) {
+      if (t.type !== 'expense' || !t.entry_id) continue;
+      m.set(t.entry_id, (m.get(t.entry_id) || 0) + (Number(t.amount) || 0));
+    }
+    return m;
+  }, [transactions]);
 
   // Effective market value for an entry — uses the entry's stored graded
   // price when present, otherwise falls back to the cached PriceCharting raw.
@@ -739,9 +788,10 @@ function CollectionView({ collection, entries, catalogIndex, variantRev = 0, onS
     // variantRev forces resort when fresh PC prices land
   }, [searchedEntries, catalogIndex, entrySort, variantRev, marketValueOf]);
   const stats = useMemo(() => {
-    let totalPaid = 0, totalMarket = 0, gradedCount = 0;
+    let totalPaid = 0, totalMarket = 0, gradedCount = 0, totalExpenses = 0;
     for (const e of entries) {
       totalPaid += Number(e.purchase_price) || 0;
+      totalExpenses += expensesByEntry.get(e.id) || 0;
       if (e.grading_company && Number(e.graded_price) > 0) {
         totalMarket += Number(e.graded_price);
         gradedCount += 1;
@@ -750,12 +800,13 @@ function CollectionView({ collection, entries, catalogIndex, variantRev = 0, onS
         if (card) totalMarket += effectiveRawPrice(card);
       }
     }
-    return { totalPaid, totalMarket, count: entries.length, gradedCount };
+    return { totalPaid, totalExpenses, totalMarket, count: entries.length, gradedCount };
     // variantRev forces recompute when PC variant snapshots land
-  }, [entries, catalogIndex, variantRev]);
+  }, [entries, catalogIndex, expensesByEntry, variantRev]);
 
-  const profit = stats.totalMarket - stats.totalPaid;
-  const profitPct = stats.totalPaid > 0 ? (profit / stats.totalPaid) * 100 : 0;
+  const totalCostBasis = stats.totalPaid + stats.totalExpenses;
+  const profit = stats.totalMarket - totalCostBasis;
+  const profitPct = totalCostBasis > 0 ? (profit / totalCostBasis) * 100 : 0;
 
   return (
     <div className="op-view">
@@ -782,7 +833,11 @@ function CollectionView({ collection, entries, catalogIndex, variantRev = 0, onS
       )}
 
       <div className="op-stats">
-        <Stat label="Paid In" value={`$${stats.totalPaid.toFixed(2)}`} />
+        <Stat
+          label="Paid In"
+          value={`$${stats.totalPaid.toFixed(2)}`}
+          sub={stats.totalExpenses > 0 ? `+ $${stats.totalExpenses.toFixed(2)} expenses` : null}
+        />
         <Stat label="Market Value" value={`$${stats.totalMarket.toFixed(2)}`} accent />
         <Stat
           label={profit >= 0 ? 'Unrealized Gain' : 'Unrealized Loss'}
@@ -846,16 +901,21 @@ function CollectionView({ collection, entries, catalogIndex, variantRev = 0, onS
               const marketValue = entry.grading_company && Number(entry.graded_price) > 0
                 ? Number(entry.graded_price)
                 : effectiveRawPrice(card);
-              const delta = marketValue - (Number(entry.purchase_price) || 0);
+              const expenses = expensesByEntry.get(entry.id) || 0;
+              const costBasis = (Number(entry.purchase_price) || 0) + expenses;
+              const delta = marketValue - costBasis;
               return (
                 <EntryRow
                   key={entry.id}
                   entry={entry}
                   card={card}
                   marketValue={marketValue}
+                  expenses={expenses}
+                  costBasis={costBasis}
                   delta={delta}
                   onClick={() => onCardClick(card)}
                   onSell={() => onSellEntry(entry)}
+                  onExpense={() => onExpenseEntry(entry)}
                   onEdit={() => onEditEntry(entry)}
                   onDelete={() => {
                     if (confirm(`Delete this ${card.name} entry? This doesn't record a sale — use the $ button if you sold the card.`)) {
@@ -1198,8 +1258,10 @@ function Stat({ label, value, sub, tone, accent }) {
   );
 }
 
-function EntryRow({ entry, card, marketValue, delta, onClick, onSell, onEdit, onDelete }) {
+function EntryRow({ entry, card, marketValue, expenses = 0, costBasis, delta, onClick, onSell, onExpense, onEdit, onDelete }) {
   const isGraded = Boolean(entry.grading_company);
+  const paid = Number(entry.purchase_price || 0);
+  const hasExpenses = expenses > 0;
   return (
     <div className="op-entry">
       <button className="op-entry-main" onClick={onClick}>
@@ -1217,8 +1279,11 @@ function EntryRow({ entry, card, marketValue, delta, onClick, onSell, onEdit, on
           </div>
         </div>
         <div className="op-entry-cell">
-          <div className="op-entry-cell-label">Paid</div>
-          <div className="op-entry-cell-val">${Number(entry.purchase_price || 0).toFixed(2)}</div>
+          <div className="op-entry-cell-label">{hasExpenses ? 'Cost basis' : 'Paid'}</div>
+          <div className="op-entry-cell-val">${(costBasis ?? paid).toFixed(2)}</div>
+          {hasExpenses && (
+            <div className="op-entry-cell-sub">${paid.toFixed(2)} + ${expenses.toFixed(2)} exp</div>
+          )}
         </div>
         <div className="op-entry-cell">
           <div className="op-entry-cell-label">Market</div>
@@ -1232,6 +1297,11 @@ function EntryRow({ entry, card, marketValue, delta, onClick, onSell, onEdit, on
       <button className="op-entry-remove" onClick={onEdit} title="Edit entry">
         <Pencil size={14} />
       </button>
+      {onExpense && (
+        <button className="op-entry-remove op-entry-expense" onClick={onExpense} title="Log an expense for this card (grading, shipping, etc.)">
+          <Plus size={14} />
+        </button>
+      )}
       <button className="op-entry-remove op-entry-sell" onClick={onSell} title="Record a sale">
         <DollarSign size={14} />
       </button>
@@ -2119,8 +2189,13 @@ function TransferModal({ members = [], collection, onClose, onSave }) {
 }
 
 // ============================================================================
-function ExpenseModal({ members = [], collection, onClose, onSave }) {
-  const [description, setDescription] = useState('');
+// ExpenseModal: pool-level or card-scoped expenses. When `card` and `entry`
+// are supplied (e.g. opened from an entry row), the expense is tied to that
+// specific copy via entry_id + card_id, so cost-basis can roll it in and
+// equity tracks who paid for grading / shipping / etc.
+function ExpenseModal({ members = [], collection, card = null, entry = null, onClose, onSave }) {
+  const cardScoped = Boolean(card && entry);
+  const [description, setDescription] = useState(cardScoped ? 'Grading fee' : '');
   const [amount, setAmount] = useState('');
   const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
   const [contributions, setContributions] = useState([]);
@@ -2138,10 +2213,14 @@ function ExpenseModal({ members = [], collection, onClose, onSave }) {
 
   const handleSave = async () => {
     setSaving(true);
+    const cardLabel = cardScoped ? `${card.displayId || card.id} ${card.name}` : null;
     await onSave({
-      collection_id: collection?.id || null,
-      card_id: null,
-      card_display_name: description.trim() || 'Expense',
+      collection_id: cardScoped ? entry.collection_id : (collection?.id || null),
+      card_id: cardScoped ? card.id : null,
+      card_display_name: cardScoped
+        ? `${description.trim() || 'Expense'} · ${cardLabel}`
+        : (description.trim() || 'Expense'),
+      entry_id: cardScoped ? entry.id : null,
       type: 'expense',
       amount: amt,
       contributions: contributions.filter(c => c.name.trim() && Number(c.amount) > 0).map(c => ({ name: c.name.trim(), amount: Number(c.amount) })),
@@ -2156,10 +2235,21 @@ function ExpenseModal({ members = [], collection, onClose, onSave }) {
       <div className="op-modal" onClick={(e) => e.stopPropagation()}>
         <button className="op-modal-close" onClick={onClose}><X size={18} /></button>
         <div className="op-modal-header">
+          {cardScoped && (
+            <div className="op-modal-art-wrap">
+              <CardArt card={card} />
+            </div>
+          )}
           <div>
-            <div className="op-eyebrow">Logging expense</div>
-            <div className="op-modal-title">Pool expense</div>
-            <div className="op-modal-sub">{collection?.name || 'Unscoped'} · sleeves, grading fees, shipping, etc.</div>
+            <div className="op-eyebrow">{cardScoped ? 'Card expense' : 'Logging expense'}</div>
+            <div className="op-modal-title">
+              {cardScoped ? `Expense for ${card.name}` : 'Pool expense'}
+            </div>
+            <div className="op-modal-sub">
+              {cardScoped
+                ? `${card.displayId || card.id} · grading, shipping, sleeves, etc.`
+                : `${collection?.name || 'Unscoped'} · sleeves, grading fees, shipping, etc.`}
+            </div>
           </div>
         </div>
 
@@ -2219,7 +2309,7 @@ function ExpenseModal({ members = [], collection, onClose, onSave }) {
 }
 
 // ============================================================================
-function TransactionsView({ transactions, collections, entries = [], catalogIndex = new Map(), variantRev = 0, activeCollectionId, onLogTransaction = () => {} }) {
+function TransactionsView({ transactions, collections, entries = [], catalogIndex = new Map(), variantRev = 0, activeCollectionId, onLogTransaction = () => {}, onRemoveTransaction = () => {} }) {
   const [typeFilter, setTypeFilter] = useState('all'); // 'all' | 'buy' | 'sell' | 'transfer' | 'expense'
   // Default the transactions view to the active collection — most users want
   // their current pool, not a global feed. The dropdown still has "All
@@ -2352,7 +2442,13 @@ function TransactionsView({ transactions, collections, entries = [], catalogInde
           members={equityMembers}
           collection={equityCollection}
           onClose={() => setModal(null)}
-          onSave={async (payload) => { await onLogTransaction(payload); setModal(null); }}
+          onSave={async (payload) => {
+            // Synthetic 'all' isn't a real collection — store null so Supabase
+            // doesn't reject the row on its uuid column.
+            const normalized = { ...payload, collection_id: payload.collection_id === 'all' ? null : payload.collection_id };
+            await onLogTransaction(normalized);
+            setModal(null);
+          }}
         />
       )}
       {modal === 'expense' && (
@@ -2360,7 +2456,11 @@ function TransactionsView({ transactions, collections, entries = [], catalogInde
           members={equityMembers}
           collection={equityCollection}
           onClose={() => setModal(null)}
-          onSave={async (payload) => { await onLogTransaction(payload); setModal(null); }}
+          onSave={async (payload) => {
+            const normalized = { ...payload, collection_id: payload.collection_id === 'all' ? null : payload.collection_id };
+            await onLogTransaction(normalized);
+            setModal(null);
+          }}
         />
       )}
 
@@ -2373,7 +2473,20 @@ function TransactionsView({ transactions, collections, entries = [], catalogInde
       ) : (
         <div className="op-tx-list">
           {filtered.map(t => (
-            <TransactionRow key={t.id} tx={t} collection={collectionsById.get(t.collection_id)} />
+            <TransactionRow
+              key={t.id}
+              tx={t}
+              collection={collectionsById.get(t.collection_id)}
+              onDelete={() => {
+                const label = t.type === 'transfer' ? 'transfer'
+                  : t.type === 'expense' ? 'expense'
+                  : t.type === 'buy' ? 'buy log (the card stays in your collection)'
+                  : t.type === 'sell' ? 'sell log' : 'transaction';
+                if (confirm(`Delete this ${label}? Equity recalculates immediately.`)) {
+                  onRemoveTransaction(t.id);
+                }
+              }}
+            />
           ))}
         </div>
       )}
@@ -2381,7 +2494,7 @@ function TransactionsView({ transactions, collections, entries = [], catalogInde
   );
 }
 
-function TransactionRow({ tx, collection }) {
+function TransactionRow({ tx, collection, onDelete }) {
   const amount = Number(tx.amount) || 0;
   // Visual style + sign per type
   const meta = {
@@ -2408,6 +2521,11 @@ function TransactionRow({ tx, collection }) {
       <div className={`op-tx-amount ${meta.tone}`}>
         {meta.sign}${amount.toFixed(2)}
       </div>
+      {onDelete && (
+        <button className="op-tx-delete" onClick={onDelete} title="Delete this transaction">
+          <Trash2 size={14} />
+        </button>
+      )}
     </div>
   );
 }
