@@ -104,20 +104,28 @@ const solo = {
 //     notes text,
 //     added_at timestamptz default now()
 //   );
-//   -- Resolved PriceCharting variant + price snapshot per OPTCG card.
-//   -- One row per (vault_key, card_id) so picks dedup across the team.
+//   -- Resolved TCGPlayer printing per OPTCG card. One row per
+//   -- (vault_key, card_id) so picks dedup across the team. `card_id` is
+//   -- the canonical id (post-2026-05-27 canonical migration). `snapshot`
+//   -- holds the per-product summary (name, image_url, rarity, is_parallel)
+//   -- so other devices skip the TCGCSV search.
 //   create table card_resolutions (
 //     id uuid primary key default gen_random_uuid(),
 //     vault_key text not null,
 //     card_id text not null,
-//     pc_product_id text,
-//     pc_product_name text,
-//     pc_console text,
 //     tcg_id text,
 //     snapshot jsonb,
 //     updated_at timestamptz default now(),
 //     unique (vault_key, card_id)
 //   );
+//   -- Existing tables that pre-date the TCGCSV migration carry three
+//   -- PriceCharting-era columns (pc_product_id, pc_product_name, pc_console)
+//   -- and one BGS-Black-Label column on entries. They no longer get written
+//   -- to. To drop them (or keep them for posterity) run:
+//   --   alter table card_resolutions drop column if exists pc_product_id;
+//   --   alter table card_resolutions drop column if exists pc_product_name;
+//   --   alter table card_resolutions drop column if exists pc_console;
+//   --   notify pgrst, 'reload schema';
 //   create index on collections (vault_key);
 //   create index on entries (vault_key);
 //   create index on card_resolutions (vault_key);
@@ -220,7 +228,7 @@ const shared = {
   async listResolutions() {
     const { data, error } = await supa
       .from('card_resolutions')
-      .select('card_id, pc_product_id, pc_product_name, pc_console, tcg_id, snapshot')
+      .select('card_id, tcg_id, snapshot')
       .eq('vault_key', VAULT_KEY);
     if (error) { console.error('listResolutions failed', error); return []; }
     return data || [];

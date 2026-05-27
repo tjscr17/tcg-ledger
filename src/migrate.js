@@ -14,6 +14,20 @@ import { loadCatalog, augmentWithErrata } from './catalog.js';
 const CANONICAL_MIGRATION_KEY = 'optcg:canonical-migration:v1';
 const TABLES = ['entries', 'transactions', 'watchlist', 'card_resolutions'];
 
+// Stage 5 of the TCGCSV migration deleted src/grading.js — these keys are
+// the localStorage caches it owned. Purge them once so a returning user
+// reclaims the space and we don't carry orphaned data forever.
+const LEGACY_PC_CACHE_KEYS = [
+  'optcg:pc:products:v1',
+  'optcg:pc:prices:v1',
+  'optcg:pc:images:v1',
+  'optcg:pc:variants:v1',
+];
+const LEGACY_PC_FILTER_KEYS = [
+  'optcg:search:priceTier', // "Price as" tier dropdown removed in Stage 4
+];
+const PC_CLEANUP_KEY = 'optcg:pc-cleanup:v1';
+
 // Build a Map<OPTCG-id, canonical-id> covering every printing the catalog
 // currently knows about — including pre-errata twins (synthesized client-side
 // by augmentWithErrata). Skip entries where the two are already identical so
@@ -72,4 +86,52 @@ export const runCanonicalMigration = async () => {
     console.info(`[canonical-migration] rewrote ${rewrites} card_id values in ${MODE} mode`);
   }
   return rewrites;
+};
+
+// One-time cleanup of localStorage keys owned by the now-deleted PriceCharting
+// client (Stage 5 of the TCGCSV migration). Before deleting the PC image
+// cache, promote its `card_id → tcg_id` mappings into the TCGCSV resolution
+// cache so solo-mode users keep their existing variant picks. Idempotent
+// via the `optcg:pc-cleanup:v1` flag.
+const RESOLUTION_CACHE_KEY = 'optcg:tcgcsv:resolutions:v1';
+const PC_IMAGES_CACHE_KEY = 'optcg:pc:images:v1';
+
+export const runPcCleanup = () => {
+  if (localStorage.getItem(PC_CLEANUP_KEY)) return 0;
+
+  // Step 1 — promote PC tcg_id mappings into the new resolution cache.
+  // Only fill in for cards that don't already have a TCGCSV resolution; the
+  // newer cache takes precedence when both exist.
+  let promoted = 0;
+  try {
+    const pcRaw = localStorage.getItem(PC_IMAGES_CACHE_KEY);
+    if (pcRaw) {
+      const pc = JSON.parse(pcRaw) || {};
+      const newRaw = localStorage.getItem(RESOLUTION_CACHE_KEY);
+      const newCache = newRaw ? JSON.parse(newRaw) : {};
+      for (const [cardId, tcgIdRaw] of Object.entries(pc)) {
+        if (newCache[cardId]?.tcg_id) continue;
+        const tcgId = Number(tcgIdRaw);
+        if (!Number.isFinite(tcgId) || tcgId <= 0) continue;
+        newCache[cardId] = { tcg_id: tcgId, saved_at: Date.now() };
+        promoted++;
+      }
+      if (promoted > 0) localStorage.setItem(RESOLUTION_CACHE_KEY, JSON.stringify(newCache));
+    }
+  } catch {}
+
+  // Step 2 — drop the legacy PC keys (image cache, product/price snapshots,
+  // and the now-removed "Price as" tier filter).
+  let removed = 0;
+  for (const k of LEGACY_PC_CACHE_KEYS) {
+    try { if (localStorage.getItem(k) != null) { localStorage.removeItem(k); removed++; } } catch {}
+  }
+  for (const k of LEGACY_PC_FILTER_KEYS) {
+    try { if (localStorage.getItem(k) != null) { localStorage.removeItem(k); removed++; } } catch {}
+  }
+  try { localStorage.setItem(PC_CLEANUP_KEY, new Date().toISOString()); } catch {}
+  if (promoted > 0 || removed > 0) {
+    console.info(`[pc-cleanup] promoted ${promoted} tcg_id mappings, removed ${removed} legacy keys`);
+  }
+  return removed;
 };

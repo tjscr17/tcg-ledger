@@ -29,7 +29,7 @@ collection ledger with live read-only pricing from third-party APIs.
 | Search | `SearchView` | Browses the OPTCG catalog (~thousands of cards) with set/rarity/color/sort filters and "Price as" toggle for graded tiers. |
 | Transactions | `TransactionsView` | Log of buys/sells/transfers/expenses with totals, type & collection filters, the EquityPanel, and `+ Transfer / + Expense / + Bulk grade` actions. |
 | Watch | `WatchView` | Watchlist with target prices and (stub) last-seen-listing fields. |
-| Resolve | `ResolveView` | One-card-at-a-time PriceCharting variant resolver — bulk-prefetch button to populate the variant cache. |
+| Resolve | `ResolveView` | One-card-at-a-time TCGCSV variant resolver — "Auto-resolve all" bulk-picks the non-parallel base for every unresolved card. |
 
 Modals: `AddCardModal`, `AddByCertModal`, `SellModal`, `TransferModal`,
 `ExpenseModal` (pool-level or entry-scoped), `BulkGradingModal`,
@@ -79,37 +79,27 @@ Sign convention on transfer contributions: **sender +, receiver −**
 
 | Source | What we pull | Where |
 |---|---|---|
-| [OPTCGAPI](https://optcgapi.com) | Card catalog, daily market price, 14-day price history, card images | `src/catalog.js` — 4 endpoints merged on first load, cached in localStorage 24h |
-| [PriceCharting](https://www.pricecharting.com/pricecharting-pro) | Graded price tiers per card (raw / PSA 10 / BGS 10 / CGC 10 / SGC 10 / generic grades 7–9.5), plus TCGPlayer image fallback. **Being phased out (Stage 2+ of the TCGCSV migration).** | `src/grading.js`. Requires `VITE_PRICECHARTING_TOKEN`. |
+| [OPTCGAPI](https://optcgapi.com) | Card catalog (~4k+ cards), 14-day price history per card, OPTCGAPI's own card images | `src/catalog.js` — 4 endpoints merged on first load, cached in localStorage 24h |
+| [TCGCSV](https://tcgcsv.com) | Daily TCGPlayer market prices (One Piece TCG = `categoryId 68`). Single price source for everything visible in the UI. Lookup is by TCGPlayer `productId`. | `src/pricing.js` (client) + `api/tcgcsv.js` (Vercel proxy with module-level productId→groupId index and per-group price caches). No auth, but the upstream blocks the default Node UA — both the function and the Vite dev middleware send an `optcg-ledger/1.0` User-Agent. |
 | [PSA Public API](https://www.psacard.com/publicapi) | Cert lookup by cert number | `src/psa.js` (client) + `api/psa.js` (Vercel proxy, since PSA blocks CORS). Requires `VITE_PSA_TOKEN`. |
-| [TCGCSV](https://tcgcsv.com) | Daily TCGPlayer market prices (One Piece TCG = `categoryId 68`). Lookup is by TCGPlayer `productId`, returned with `market_price / low / mid / high / sub_type_name / fetched_at`. | `src/pricing.js` (client) + `api/tcgcsv.js` (Vercel proxy with module-level productId→groupId and per-group price caches). No auth required, but the upstream blocks the default Node UA — both the function and the Vite dev middleware send an `optcg-ledger/1.0` User-Agent. |
 
-> **MISMATCH** — `CONVERSATION_CONTEXT.md` says PriceCharting "is being
-> dropped" and TCGCSV is the leading replacement. Reality: PriceCharting is
-> deeply integrated as the **only** source of graded prices and as an image
-> fallback. TCGCSV / eBay / Cardmarket / Yuyu-tei / Cardrush / Snkrdunk all
-> have **zero** integration in the current code. Those belong in
-> `PLANNING.md` as future state.
+Graded prices today are **manual entry only** on entries — there's no
+auto-fetch source for PSA 10 / BGS 10 / etc. The roadmap (`PLANNING.md`
+Phase 4–5) covers re-enabling this via eBay sold data + a fair-value model.
 
-### Pricing field reuse quirk (`src/grading.js`)
+### Variant resolution
 
-PriceCharting reuses video-game field slots for TCG grade tiers. Verified mapping for OPTCG:
+A canonical card id maps to a TCGPlayer `productId` via the resolver in
+the Resolve view. The mapping lives in:
 
-| Grade | PriceCharting field |
-|---|---|
-| Ungraded / Raw | `loose-price` |
-| Grade 7 (any company) | `cib-price` |
-| Grade 8 (any company) | `new-price` |
-| Grade 9 (any company) | `graded-price` |
-| Grade 9.5 (any company) | `box-only-price` |
-| PSA 10 | `manual-only-price` |
-| BGS 10 | `bgs-10-price` |
-| CGC 10 | `condition-17-price` |
-| SGC 10 | `condition-18-price` |
+- **localStorage** — `optcg:tcgcsv:resolutions:v1`, keyed by canonical id
+- **Supabase** (shared mode) — `card_resolutions.tcg_id` plus a `snapshot`
+  jsonb with the product summary so teammates skip the search
 
-Grades 7–9.5 are aggregated across companies (PSA 9 and BGS 9 read the same
-field). The UI surfaces this caveat. BGS 10 Black Label has no PC field —
-manual price only.
+`pricing.js` exposes `getTcgId(cardId)`, `getMarketPriceForCard(card)`,
+`ensurePriceForCard(card)` (fire-and-forget warm-up), `searchTcgProducts(displayId)`,
+and `saveResolution(cardId, product)`. The `onPriceResolved` emitter
+drives UI re-renders when async price fetches land.
 
 ---
 
@@ -146,9 +136,10 @@ rewrites legacy OPTCG-flavored `card_id` values across all DB tables on
 first boot, gated by an `optcg:canonical-migration:v1` localStorage flag.
 
 > Card identity is **not** a UUID indirection — the canonical id is the
-> primary key. There is no separate `card_mappings` table; per-source IDs
-> (TCGPlayer product id, PriceCharting product id, etc.) live alongside on
-> the relevant rows (`card_resolutions.pc_product_id`, soon `tcg_product_id`).
+> primary key. There is no separate `card_mappings` table; the TCGPlayer
+> productId lives on `card_resolutions.tcg_id`. Add additional source
+> mappings as columns or as a future mappings table when a second pricing
+> source lands.
 
 ### `transactions`
 Append-ish ledger. Each entry creation writes a `buy` tx; each sale writes a
@@ -167,11 +158,16 @@ can also delete arbitrary transactions via the trash icon (see Decisions Log).
 > `price_history` table.
 
 ### `card_resolutions`
-`(id, vault_key, card_id text, pc_product_id, pc_product_name, pc_console, tcg_id, snapshot jsonb, updated_at, unique(vault_key, card_id))`
+`(id, vault_key, card_id text, tcg_id text, snapshot jsonb, updated_at, unique(vault_key, card_id))`
 
-Caches the PriceCharting product pick + full price snapshot for each OPTCG
-card so a team's variant-resolution work is collective. Snapshot is upserted
-whenever someone resolves a card.
+Caches the TCGPlayer printing each canonical card has been resolved to,
+plus a `snapshot` with the product summary (name, image_url, rarity,
+is_parallel). Lets a team's variant-resolution work be collective.
+
+> Tables that pre-date 2026-05-27 also carry three PriceCharting-era
+> columns (`pc_product_id`, `pc_product_name`, `pc_console`) that no
+> longer get written to. SQL to drop them is in
+> [src/storage.js](src/storage.js) near the schema comment.
 
 ### `watchlist`
 `(id, vault_key, card_id, card_display_name, target_price, notes, last_checked_at, last_seen_url, last_seen_price, last_seen_source, created_at)`
@@ -202,23 +198,23 @@ src/
   styles.css     All CSS, BEM-ish op-* class names
   storage.js     Solo↔shared storage adapter + Supabase schema as SQL comments
   catalog.js     OPTCGAPI catalog/history fetch + cache, pre-errata twins,
-                 set sort buckets
-  grading.js     PriceCharting client: variant search, tier price lookup,
-                 image fallback via TCGPlayer CDN, shared-mode resolution
-                 sync (hydrateFromShared / subscribeResolutions)
+                 set sort buckets, canonicalIdOf
+  pricing.js     TCGCSV pricing client + variant resolver. Market price
+                 lookups by tcg_id, product search by card number, image
+                 fallback via TCGPlayer CDN, shared-mode resolution sync
+                 (hydrateResolutionsFromShared / subscribeToSharedResolutions),
+                 onPriceResolved emitter.
   psa.js         PSA cert client + OPTCG match heuristics (multi-strategy:
                  full-ID extract → set-prefix + card-number pairing →
                  name+number intersection → fuzzy subject match → parallel
                  disambiguation). findCandidateCards returns all siblings
                  for the user picker.
   migrate.js     One-time client-side migrations gated by versioned
-                 localStorage flags. Currently runs the canonical-id rewrite
-                 across entries/transactions/watchlist/card_resolutions on
-                 first boot post-2026-05-27.
-  pricing.js     TCGCSV pricing client. Looks up TCGPlayer market prices
-                 by productId through /api/tcgcsv, caches per-card snapshots
-                 in localStorage, and emits onPriceResolved events so
-                 consumers re-render when async fetches land.
+                 localStorage flags. runCanonicalMigration rewrites
+                 entries/transactions/watchlist/card_resolutions to
+                 canonical card_ids; runPcCleanup promotes legacy
+                 PriceCharting tcg_id mappings into the new resolution
+                 cache and deletes the PC localStorage keys.
 
 api/
   psa.js         Vercel serverless function: PSA cert proxy. Reads
@@ -263,21 +259,20 @@ There is no `tests/`, no `scripts/`, no Python, no scraper code, no `lib/`.
   filter UI that should survive reload (sort orders, search queries, etc.).
 - **`useMemo` heavily** for derived state — `catalogIndex`, `equity`,
   `sortedEntries`, etc. The `variantRev` integer counter is a dep that
-  re-renders downstream consumers when PriceCharting variant snapshots land
-  asynchronously.
+  re-renders downstream consumers when TCGCSV price snapshots land
+  asynchronously (subscribed via `onPriceResolved`).
 - **Comments document the WHY, not the what.** There are many one-paragraph
-  comments explaining domain edge cases (PriceCharting field reuse, pre-errata
-  twin handling, transfer sign convention, etc.). Preserve this style when
-  adding non-obvious code.
+  comments explaining domain edge cases (pre-errata twin handling, transfer
+  sign convention, the canonical-id source-set prefix, etc.). Preserve this
+  style when adding non-obvious code.
 - **No automated tests.** Manual verification via `npm run dev`. `npm run
   build` catches syntax/import errors.
 
 ### Storage
 
 - **Always go through `store` from `src/storage.js`** — never read/write
-  `localStorage` or Supabase directly for app data. Caches in `grading.js`
-  and `catalog.js` are the exception (they're per-card lookup caches, not
-  app state).
+  `localStorage` or Supabase directly for app data. Caches in `pricing.js`
+  and `catalog.js` are the exception (per-card lookup caches, not app state).
 - **Insert failures are silent in shared mode** — `shared.insert` returns
   `null` on PostgREST errors (e.g. missing column). Surface failures with a
   user-visible alert if you add a new write path; see `addEntry` /
@@ -300,8 +295,7 @@ There is no `tests/`, no `scripts/`, no Python, no scraper code, no `lib/`.
 ### Money
 
 - Dollars. All prices stored as `numeric` / float USD.
-- PriceCharting returns prices as **integer pennies** — `grading.js` divides
-  by 100 on read.
+- TCGCSV returns prices as decimals (no conversion needed).
 
 ---
 
@@ -314,8 +308,9 @@ There is no `tests/`, no `scripts/`, no Python, no scraper code, no `lib/`.
 | `VITE_SUPABASE_URL` | Shared mode | Supabase project URL |
 | `VITE_SUPABASE_KEY` | Shared mode | Anon/public key (RLS does the partitioning) |
 | `VITE_VAULT_KEY` | Shared mode | Partition string — anyone with this key sees the same data |
-| `VITE_PRICECHARTING_TOKEN` | Grading / image fallback | 40-char PC token |
 | `VITE_PSA_TOKEN` | Add-by-cert flow | PSA Bearer token (also read server-side by `api/psa.js`) |
+
+TCGCSV requires no auth — the proxy sends a polite User-Agent and that's it.
 
 `VITE_` prefix exposes the var to the client bundle. Vercel passes *all*
 env vars to serverless functions regardless of prefix, so `api/psa.js` can
@@ -343,18 +338,18 @@ These are flagged inline above; collected here for review:
 
 | Context doc says | Code says |
 |---|---|
-| Backend in Python | No Python; one Vercel JS function (`api/psa.js`) |
-| PriceCharting being phased out | **In progress (2026-05-27)**: TCGCSV proxy + client module landed (Stage 1). PriceCharting still drives all reads in the UI; Stages 2-5 will migrate consumers and rip it out. |
-| TCGCSV is the next price baseline | **Partially landed (2026-05-27)**: `/api/tcgcsv` proxy + `src/pricing.js` client wired and verified end-to-end. Not yet read by any UI surface. |
+| Backend in Python | No Python; two tiny Vercel JS functions (`api/psa.js`, `api/tcgcsv.js`) |
+| PriceCharting being phased out | **Resolved (2026-05-27)**: PriceCharting fully removed in Stage 5 of the TCGCSV migration. No code path touches PC anymore; the `card_resolutions.pc_*` columns still exist on legacy DBs (SQL to drop them is in `src/storage.js`). |
+| TCGCSV is the next price baseline | **Resolved (2026-05-27)**: TCGCSV is the sole price source. `/api/tcgcsv` proxy + `src/pricing.js` client + Resolve view variant resolver. |
 | eBay / Cardmarket / Yuyu-tei / Cardrush / Snkrdunk | Zero integration |
 | Schema: `cards`, `sets`, `card_mappings`, `holdings`, `current_prices`, `price_history`, `listings`, `sales`, `fair_values`, `scrape_log`, `events` | Schema: `collections`, `entries`, `transactions`, `card_resolutions`, `watchlist` |
-| Internal UUID `card_id` + external mappings table | **Partially resolved (2026-05-27)**: card IDs are now canonical (`canonicalIdOf(card)`, source-stable across catalog sources). Not UUIDs and there's still no separate mappings table — per-source IDs (TCGPlayer product, etc.) live on the row that uses them. |
+| Internal UUID `card_id` + external mappings table | **Resolved (2026-05-27)**: card IDs are canonical (`canonicalIdOf(card)`, source-stable). Not UUIDs and there's still no separate mappings table — TCGPlayer productId lives on `card_resolutions.tcg_id`. |
 | Supabase Auth + per-user RLS from day one | No auth; shared `VITE_VAULT_KEY` + permissive `using (true)` RLS |
 | `sales` and `price_history` are append-only | No such tables; transactions are user-deletable |
 | Playwright scrapers, residential proxies, rotating UAs | No scrapers exist |
-| Admin review queue for matcher | Closest analog is the Resolve view, which is a per-card PC variant picker — not a confidence-bucketed review queue |
-| Fair value model | Not built; prices come straight from PriceCharting |
-| Grade premiums via pop-aware regression | Grade-specific prices are direct PriceCharting per-company tier reads |
+| Admin review queue for matcher | Closest analog is the Resolve view: per-card TCGCSV picker + "Auto-resolve all" bulk action. Not a confidence-bucketed review queue. |
+| Fair value model | Not built. Graded prices are manual entry on entries — auto-fetch parked until eBay/fair-value source exists. |
+| Grade premiums via pop-aware regression | Not built. Same status as fair value above. |
 
 The context doc describes the **future** product. This codebase is closer to
 **Phase 0 / Phase 1**: a personal collection ledger with live read-only

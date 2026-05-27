@@ -1,6 +1,6 @@
 # The Ledger — One Piece TCG Collection Tracker
 
-A web app for tracking your One Piece TCG collection with live market prices from [OPTCGAPI](https://optcgapi.com). Search ~4,000+ cards across all sets, log who paid what, and watch your portfolio value move.
+A web app for tracking your One Piece TCG collection with daily TCGPlayer market prices and a card catalog from [OPTCGAPI](https://optcgapi.com). Search ~4,000+ cards across all sets, log who paid what, and watch your portfolio value move.
 
 ## Two ways to run it
 
@@ -102,20 +102,29 @@ If you ever want to change keys (start fresh), update the env var, redeploy, and
 src/
   App.jsx        Main app + all views
   storage.js     Storage adapter (localStorage in solo, Supabase in shared)
-  catalog.js    Card catalog + price history from OPTCGAPI
+  catalog.js     Card catalog + price history from OPTCGAPI
+  pricing.js     TCGCSV pricing client (raw market prices + variant resolver)
+  psa.js         PSA cert lookup client (used by "Add by cert")
+  migrate.js     One-time client-side migrations (canonical id rewrite, etc.)
   styles.css     All styles
   main.jsx       React entry point
+
+api/
+  tcgcsv.js      Vercel function: TCGCSV proxy (price lookup + variant search)
+  psa.js         Vercel function: PSA cert proxy (PSA blocks browser CORS)
 ```
 
 ## Data sources
 
-- **Card catalog & prices**: [OPTCGAPI](https://optcgapi.com) by DomoSlime — free, no auth, refreshed daily. Catalog is cached in your browser for 24 hours.
-- **Card images**: Served by OPTCGAPI from their CDN.
+- **Card catalog**: [OPTCGAPI](https://optcgapi.com) by DomoSlime — free, no auth, refreshed daily. Catalog is cached in your browser for 24 hours.
+- **Card images**: OPTCGAPI's CDN where available; falls back to the TCGPlayer product CDN once a card has been resolved to a TCGPlayer printing.
+- **Market prices**: [TCGCSV](https://tcgcsv.com) — daily TCGPlayer dumps, free, no auth. Routed through `/api/tcgcsv` which caches the productId↔group index and per-group prices on the function instance.
+- **PSA certs** (optional): the official PSA public API, proxied through `/api/psa` to dodge CORS. Set `VITE_PSA_TOKEN` to enable the "Add by cert" flow.
 
-If OPTCGAPI is ever down, the cached catalog keeps working. If it goes away long-term, you'd swap the implementation in `src/catalog.js` for another source (e.g. [Limitless TCG](https://onepiece.limitlesstcg.com) or your own scrape).
+If OPTCGAPI is ever down, the cached catalog keeps working. If TCGCSV is down, prices fall back to whatever's still cached locally (snapshots TTL 6h).
 
 ## License & credits
 
 One Piece and the One Piece Trading Card Game are trademarks of Eiichiro Oda, Bandai, Shonen Jump, and Viz Media. Please support the official release.
 
-Card data via [OPTCGAPI](https://optcgapi.com) (free, community-run).
+Card data via [OPTCGAPI](https://optcgapi.com) (free, community-run). Pricing via [TCGCSV](https://tcgcsv.com) (free; please set a polite User-Agent if you self-host the proxy).

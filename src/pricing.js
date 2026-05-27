@@ -1,18 +1,17 @@
 // ============================================================================
 // TCGCSV pricing client — talks to /api/tcgcsv (Vercel function in prod,
 // Vite middleware in dev) to fetch the latest TCGPlayer market prices for
-// One Piece TCG cards. Replaces PriceCharting for raw / market prices.
+// One Piece TCG cards. The sole price source for this app.
 //
-// Lookups are keyed on TCGPlayer's `productId` (the same int we already
-// store as `tcg_id` on card_resolutions, populated historically by the
-// PriceCharting bridge). Migration from PC to TCGCSV reuses that mapping
-// directly — no new variant-resolution work needed for already-resolved
-// cards.
+// Lookups are keyed on TCGPlayer's `productId` (stored as `tcg_id` on
+// card_resolutions and on the local resolution cache). The variant resolver
+// in the Resolve view populates this mapping; users can also pick a
+// printing directly from the AddCardModal flow.
 //
 // Caches the per-card snapshot in localStorage so a Collection view with
 // hundreds of cards doesn't slam the proxy on every render. A tiny pub/sub
-// (mirrors grading.js's onVariantResolved) lets consumers re-render when
-// a previously-pending price lands.
+// (`onPriceResolved`) lets consumers re-render when a previously-pending
+// price lands.
 // ============================================================================
 
 import { store, MODE } from './storage.js';
@@ -20,35 +19,24 @@ import { store, MODE } from './storage.js';
 const PRICE_CACHE_KEY = 'optcg:tcgcsv:prices:v1';
 const PRICE_TTL_MS = 6 * 60 * 60 * 1000; // 6h — TCGCSV refreshes daily, this is generous
 
-// Primary card_id → TCGPlayer productId cache written by the TCGCSV
-// resolver (Stage 3). Read precedence: this key first, then the legacy
-// PriceCharting cache below as fallback during the transition window.
+// Primary card_id → TCGPlayer productId cache. Written by the TCGCSV
+// resolver (Stage 3) and by `runPcCleanup` (Stage 5, which promotes the
+// legacy PriceCharting image cache's `card_id → tcg_id` mappings into
+// here once before deleting the PC keys).
 const RESOLUTION_CACHE_KEY = 'optcg:tcgcsv:resolutions:v1';
 
-// Legacy bridge: PriceCharting historically resolved every card to a
-// TCGPlayer `tcg-id`, cached in localStorage at this key. Stage 2 reads
-// from it so a fresh app with no TCGCSV resolutions yet still shows prices.
-// Once Stage 5 lands and PC is gone, this becomes unused.
-const PC_TCG_ID_CACHE_KEY = 'optcg:pc:images:v1';
-
 // Synchronous lookup: returns the TCGPlayer productId for a canonical
-// card id, or null when we haven't resolved one yet. Checks the new
-// TCGCSV resolution cache first, then the legacy PriceCharting image
-// cache; also tries the legacy OPTCG-style id as a fallback key.
+// card id, or null when we haven't resolved one yet. Also tries the
+// legacy OPTCG-style id as a fallback key — useful right after the
+// canonical migration when a row may have been keyed under either form.
 export const getTcgId = (cardId, legacyId) => {
   if (!cardId && !legacyId) return null;
   try {
-    const newRaw = localStorage.getItem(RESOLUTION_CACHE_KEY);
-    const newCache = newRaw ? JSON.parse(newRaw) : {};
-    const newHit = (cardId && newCache[cardId]?.tcg_id)
-      || (legacyId && newCache[legacyId]?.tcg_id)
-      || null;
-    if (newHit) return Number(newHit);
-  } catch {}
-  try {
-    const raw = localStorage.getItem(PC_TCG_ID_CACHE_KEY);
+    const raw = localStorage.getItem(RESOLUTION_CACHE_KEY);
     const cache = raw ? JSON.parse(raw) : {};
-    const hit = (cardId && cache[cardId]) || (legacyId && cache[legacyId]) || null;
+    const hit = (cardId && cache[cardId]?.tcg_id)
+      || (legacyId && cache[legacyId]?.tcg_id)
+      || null;
     return hit ? Number(hit) : null;
   } catch {
     return null;
@@ -183,6 +171,22 @@ export const getMarketPriceForCard = (card) => {
   return getCachedMarketPrice(tcgId);
 };
 
+// Synchronous image URL for a card whose OPTCGAPI image is missing.
+// Uses the saved TCGCSV resolution's image_url; if absent but a tcg_id is
+// known, constructs the TCGPlayer CDN URL directly. Returns null when no
+// resolution exists.
+const tcgImageUrlFromId = (tcgId) =>
+  tcgId ? `https://tcgplayer-cdn.tcgplayer.com/product/${tcgId}_in_1000x1000.jpg` : null;
+
+export const getCachedImageForCard = (card) => {
+  if (!card) return null;
+  const cid = card.canonicalId || card.id;
+  const resolution = getResolution(cid);
+  if (resolution?.image_url) return resolution.image_url;
+  const tcgId = getTcgId(cid, card.id);
+  return tcgImageUrlFromId(tcgId);
+};
+
 // Card-level convenience: kicks off a price fetch if we have a tcg_id and
 // the cache is stale. Returns the resolved snapshot (or null if nothing
 // could be fetched). Fire-and-forget friendly — callers that just want to
@@ -278,14 +282,12 @@ export const saveResolution = (cardId, productSummary) => {
   emit(tcgId);
 
   // Shared-mode sync. Reuses the existing card_resolutions table — its
-  // tcg_id column is exactly what we want. Other PC-specific columns
-  // (pc_product_id, pc_product_name, snapshot) are left untouched; Stage 5
-  // will drop them.
+  // tcg_id column carries the canonical → productId mapping; the snapshot
+  // jsonb stores the product summary so other devices skip the search.
   if (MODE === 'shared') {
     store.upsertResolution(cardId, {
       tcg_id: String(tcgId),
-      pc_product_name: productSummary.name || '',
-      pc_console: 'One Piece Card Game',
+      snapshot: summary,
     }).catch(() => {});
   }
 };
@@ -302,4 +304,57 @@ export const clearResolution = (cardId) => {
       localStorage.setItem(RESOLUTION_CACHE_KEY, JSON.stringify(cache));
     }
   } catch {}
+};
+
+// Pull every shared-mode resolution row into the local cache. Run once on
+// app boot when MODE === 'shared'; in solo mode this is a no-op (returns 0).
+export const hydrateResolutionsFromShared = async () => {
+  if (MODE !== 'shared') return 0;
+  let rows;
+  try { rows = await store.listResolutions(); } catch { return 0; }
+  if (!rows || rows.length === 0) return 0;
+  let writes = 0;
+  try {
+    const raw = localStorage.getItem(RESOLUTION_CACHE_KEY);
+    const cache = raw ? JSON.parse(raw) : {};
+    for (const row of rows) {
+      if (!row.card_id || !row.tcg_id) continue;
+      const tcgId = Number(row.tcg_id);
+      if (!Number.isFinite(tcgId) || tcgId <= 0) continue;
+      cache[row.card_id] = {
+        ...(row.snapshot && typeof row.snapshot === 'object' ? row.snapshot : {}),
+        tcg_id: tcgId,
+        saved_at: cache[row.card_id]?.saved_at || Date.now(),
+      };
+      writes++;
+    }
+    localStorage.setItem(RESOLUTION_CACHE_KEY, JSON.stringify(cache));
+  } catch {}
+  // Don't emit on initial hydrate — listeners haven't subscribed yet and a
+  // batch of bumps would be wasted. Future remote updates are pushed via
+  // subscribeToSharedResolutions.
+  return writes;
+};
+
+// Subscribe to real-time updates from teammates' resolutions. Returns an
+// unsubscribe function. Solo mode is a no-op (returns no-op unsub).
+export const subscribeToSharedResolutions = () => {
+  if (MODE !== 'shared') return () => {};
+  return store.subscribeResolutions((payload) => {
+    const row = payload?.new || payload?.record;
+    if (!row || !row.card_id || !row.tcg_id) return;
+    const tcgId = Number(row.tcg_id);
+    if (!Number.isFinite(tcgId) || tcgId <= 0) return;
+    try {
+      const raw = localStorage.getItem(RESOLUTION_CACHE_KEY);
+      const cache = raw ? JSON.parse(raw) : {};
+      cache[row.card_id] = {
+        ...(row.snapshot && typeof row.snapshot === 'object' ? row.snapshot : {}),
+        tcg_id: tcgId,
+        saved_at: Date.now(),
+      };
+      localStorage.setItem(RESOLUTION_CACHE_KEY, JSON.stringify(cache));
+    } catch {}
+    emit(tcgId);
+  });
 };

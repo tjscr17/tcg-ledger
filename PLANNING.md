@@ -28,9 +28,8 @@ Status conventions:
 | Bulk grading flow | ✅ | Multi-card select, per-card cost, payer splits scaled proportionally |
 | Capital-mode equity | ✅ | Net signed contributions, equity % from positive nets |
 | Time-weighted equity | ✅ | Fund-accounting units, two-direction NAV mark on buys/sells, transfer is zero-sum at current unit price |
-| PriceCharting variant resolution | ✅ | Per-card picker + manual snapshot, shared via `card_resolutions` in shared mode |
-| Bulk PriceCharting prefetch | ✅ | "Resolve" view runs through unresolved cards |
-| PriceCharting image fallback | ✅ | TCGPlayer CDN via tcg-id when OPTCGAPI image missing |
+| TCGCSV variant resolution | ✅ | Per-card picker + auto-resolve-all bulk action in Resolve view; shared via `card_resolutions.tcg_id` + `snapshot` in shared mode |
+| Card image fallback | ✅ | OPTCGAPI image when available, else TCGPlayer CDN via the saved `tcg_id` |
 | PSA cert lookup → entry pre-fill | ✅ | Vercel function proxies CORS; multi-strategy catalog matcher |
 | PSA parallel/alt-art picker | ✅ | `findCandidateCards` returns all printings sharing a displayId |
 | Pre-errata twin support | ✅ | Per-card toggle; synthesizes a twin in the augmented catalog |
@@ -43,10 +42,10 @@ Status conventions:
 | Historical price snapshots in DB | ⬜ | Only OPTCGAPI's 14-day window, no local persistence |
 | Live listings / underpriced alerts | ⬜ | Future Phase 3 |
 | Fair value model | ⬜ | Future Phase 4 |
-| Grade premium model | ⬜ | Today reads PC tier prices directly; no scarcity-aware modeling |
+| Grade premium model | ⬜ | Graded prices are manual entry only (auto-fetch parked Stage 4); a pop-aware scarcity model needs eBay-sold data |
 | JP / EU coverage | ⬜ | OPTCGAPI is the only catalog |
 | Python anywhere | ❌ | Project is React + Vite + JS only; reversed from the original context doc |
-| TCGCSV integration | 🟡 | In progress (2026-05-27): Stages 1–4 done — TCGCSV is the source of every raw price the UI shows, the Resolve view runs entirely on TCGCSV, and the AddCardModal grading section is now manual-entry only. Stage 5 (delete PriceCharting client + env var + dead UI) is all that's left. |
+| TCGCSV integration | ✅ | Complete (2026-05-27): TCGCSV is the only price source. `/api/tcgcsv` proxy + `src/pricing.js` + variant resolver in Resolve view. PriceCharting fully removed (no client, no env var, no UI). Legacy DB columns can be dropped at your leisure via SQL in `src/storage.js`. |
 | Canonical card IDs | ✅ | `canonicalIdOf(card)` in catalog.js; one-time DB migration in src/migrate.js; all callers updated |
 | Playwright scrapers | ⬜ | Future Phase 3 |
 | Daily backups of price/sales history | ⬜ | Not configured |
@@ -60,10 +59,11 @@ Preserved from `CONVERSATION_CONTEXT.md`, annotated against current state.
 
 ### Phase 0 — Personal ledger (CURRENT)
 
-What exists today: dual-mode collection tracker with PriceCharting-backed
-graded prices, sophisticated equity tracking, manual PSA cert ingestion,
-shared-vault sync. Roughly the project as a personal/friend-group tool
-before any of the broader marketplace ambitions land.
+What exists today: dual-mode collection tracker with TCGCSV-backed market
+prices, sophisticated equity tracking, manual PSA cert ingestion, manual
+graded-price entry (auto-fetch parked), shared-vault sync. Roughly the
+project as a personal/friend-group tool before any of the broader
+marketplace ambitions land.
 
 **Exit criteria for this phase** (proposed):
 - [ ] Equity math feels stable in real use across both modes
@@ -76,18 +76,20 @@ before any of the broader marketplace ambitions land.
 Per context doc: replace PriceCharting with TCGCSV, build the matcher
 pipeline + review queue.
 
-**Current state:**
-- 🟡 OPTCGAPI provides raw prices; PriceCharting provides graded tiers and
-  images. *Neither is being replaced today.*
-- 🟡 PriceCharting variant resolution is in-place but per-card and manual
-  (the "Resolve" view). Closest analog to a matcher.
-- ⬜ TCGCSV: not integrated. Join-rate study against OPTCG never done.
+**Current state (2026-05-27, post-migration):**
+- ✅ TCGCSV is the sole price source. `/api/tcgcsv` proxies the daily
+  TCGPlayer dumps; `src/pricing.js` caches per-card snapshots.
+- ✅ Variant resolver in the Resolve view: per-card picker showing every
+  TCGPlayer printing for that card number, plus an "Auto-resolve all"
+  bulk action that picks the non-parallel base for each unresolved card.
 - ⬜ Confidence-bucketed admin review queue (auto / needs-review /
-  unmatched): not built. Today's resolver shows all unresolved cards equally.
+  unmatched): not built. Today's resolver shows all unresolved cards
+  equally — the auto-resolve picks confidently but doesn't flag low-confidence
+  matches for review.
 
 **Exit criteria** (per context doc): ≥95% of cards have a confirmed mapping
-and a current price. Today's PriceCharting picks would need an audit pass
-to measure against this.
+and a current price. Achievable today via the "Auto-resolve all" button;
+needs a post-run audit to count the gaps and a separate UI to surface them.
 
 ### Phase 2 — Historical price capture ⬜
 
@@ -121,14 +123,15 @@ on a VPS, alert rules, notifications.
 eBay Marketplace Insights → `sales` (append-only), liquid + illiquid models,
 `fair_values` publish.
 
-**Current state:** none of this exists. Prices are direct PriceCharting reads.
+**Current state:** none of this exists. Prices are direct TCGCSV reads.
 
 ### Phase 5 — Grade premiums ⬜
 
 Pop-aware scarcity multipliers.
 
-**Current state:** graded prices are direct per-company tier reads from
-PriceCharting, no modeling layer.
+**Current state:** graded prices are manual entry on entries — auto-fetch
+parked in Stage 4 of the TCGCSV migration. Re-enable once Phase 4 lands
+eBay sold data, or pull from a different graded source if one shows up.
 
 ### Later
 
@@ -198,15 +201,14 @@ shown is the first commit introducing the change.
 | 2026-05-27 | TCGCSV migration Stage 3: `/api/tcgcsv?number=X` search endpoint returns every TCGPlayer printing for a card identity. New helpers `searchTcgProducts`, `saveResolution`, `getResolution`, `cardNumberFromCanonical` in `pricing.js`. Resolutions write to a new `optcg:tcgcsv:resolutions:v1` localStorage cache + (shared mode) `card_resolutions.tcg_id`. ResolveView rewritten around TCGCSV — "Auto-resolve all" picks the non-parallel base for each unresolved card; manual picker shows market/low/mid/high per candidate; `getTcgId` reads from the new cache first, legacy PC cache second. Stage 3d (AddCardModal variant dropdown) deferred to Stage 4 since that whole grading section gets parked. | Removes the last hard dependency on PriceCharting search for new resolutions — all cards (including freshly unresolved ones) can now be pointed at a TCGPlayer printing without a PC token. | `api/tcgcsv.js`, `vite.config.js`, `src/pricing.js`, `src/App.jsx` |
 | 2026-05-27 | Fix: `loadPriceHistory(cardId)` strips parallel/variant suffixes (`_p1`, `-p1`, `-pre-errata`, `__<tag>`) before hitting OPTCGAPI's `/twoweeks` endpoints. The upstream returns 500 (without CORS headers) for any id beyond the base `<setCode>-<cardNumber>`, which surfaced in the browser as a scary CORS error even though we caught the network failure. | Came in as a user-visible "CORS errors in console" after Stage 2 deployed. Unrelated to the TCGCSV migration; standalone bug. | `src/catalog.js` |
 | 2026-05-27 | TCGCSV migration Stage 4: park PriceCharting-driven graded auto-refresh. Removed the "Price as" tier toggle in Search (Raw is the only tier the new data source exposes), the PriceCharting variant dropdown + Refresh button + auto-refetch effects in AddCardModal, the PSA 10 hint chips in AddCardModal/CardDetailDrawer, and the `priceTier`/`showTier` rendering path in CardTile/SetGroup. Entry-level grading fields (grading_company, grade, bgs_black, cert_number, graded_price) stay manual-entry; AddByCertModal still works because PSA cert lookup is independent of PC. Dropped 9 imports from grading.js (`fetchGradedPrice`, `isAggregateAcrossCompanies`, `searchVariants`, `getSavedPick`, `savePick`, `priceFromProduct`, `PRICE_TIERS`, `getCachedTierPrice`). Bundle shrank ~5 KB. | Decouples the UI from PriceCharting so Stage 5 can delete `src/grading.js` outright. Re-enable graded auto-refresh later once a real graded-pricing source (eBay sold data / fair-value model) is in place. | `src/App.jsx` |
+| 2026-05-27 | TCGCSV migration Stage 5: PriceCharting fully removed. `src/grading.js` deleted; image fallback and shared-mode resolution sync moved into `src/pricing.js` (`getCachedImageForCard`, `hydrateResolutionsFromShared`, `subscribeToSharedResolutions`). `useEnhancedImage` rewritten to drop the PC fetch path. `effectiveRawPrice` no longer falls back to PC's `getCachedLoosePrice`. `runPcCleanup` in `src/migrate.js` promotes the legacy `optcg:pc:images:v1` tcg_id mappings into the new TCGCSV resolution cache before deleting all `optcg:pc:*` localStorage keys (idempotent via `optcg:pc-cleanup:v1` flag). `VITE_PRICECHARTING_TOKEN` removed from `.env.example`. README + CLAUDE.md + storage.js schema comments updated. Legacy `card_resolutions.pc_*` columns in Supabase stay until the user runs the drop-column SQL documented in `src/storage.js`. Bundle 464 KB (gzip 130 KB) — back to roughly pre-migration size despite the new TCGCSV plumbing. | Final stage of the PriceCharting → TCGCSV swap. End state: TCGCSV is the only price source; PC is gone from the bundle, env vars, and active code paths. | `src/App.jsx`, `src/pricing.js`, `src/migrate.js`, `src/storage.js`, `.env.example`, `README.md`, deleted `src/grading.js` |
 
 ### Decisions explicitly **not** taken (despite the context doc)
 
 - Did **not** move backend to Python. Project is JS end-to-end.
-- Did **not** start phasing out PriceCharting. It is the active grading-price
-  source and image fallback.
 - Did **not** adopt the proposed `cards / card_mappings / holdings / ...`
   schema. Current schema is `collections / entries / transactions / ...`
-  keyed by vault, with OPTCG card ids as direct keys.
+  keyed by vault, with canonical card ids as direct keys.
 - Did **not** add real user auth. `VITE_VAULT_KEY` is the access boundary.
 - Did **not** make `sales` / `transactions` append-only. The user
   intentionally has a delete-tx action.

@@ -2,18 +2,13 @@ import { useState, useEffect, useMemo, useRef, useCallback, useReducer } from 'r
 import { Search, Plus, X, TrendingUp, TrendingDown, Folder, Trash2, DollarSign, Anchor, ChevronRight, Package, BarChart3, RefreshCw, Cloud, HardDrive, ImageOff, Award, Loader2, Pencil, Eye, EyeOff } from 'lucide-react';
 import { store, MODE, VAULT_LABEL } from './storage.js';
 import { loadCatalog, loadPriceHistory, groupBySet, compareSets, augmentWithErrata, hasPreErrata, togglePreErrata } from './catalog.js';
-import {
-  GRADING_COMPANIES, GRADES_BY_COMPANY,
-  hasToken,
-  getCachedImage, resolveEnhancedImage,
-  getCachedLoosePrice, isVariantSnapshotFresh, resolveVariantSnapshot,
-  onVariantResolved, hydrateFromShared, subscribeResolutions,
-} from './grading.js';
 import { hasPsaToken, fetchCert, findCandidateCards } from './psa.js';
-import { runCanonicalMigration } from './migrate.js';
+import { runCanonicalMigration, runPcCleanup } from './migrate.js';
 import {
   getMarketPriceForCard, ensurePriceForCard, onPriceResolved,
   searchTcgProducts, saveResolution, getResolution, cardNumberFromCanonical,
+  getCachedImageForCard,
+  hydrateResolutionsFromShared, subscribeToSharedResolutions,
 } from './pricing.js';
 
 // Like useState, but persists to localStorage. `serialize`/`deserialize` are
@@ -33,82 +28,47 @@ const useStoredState = (key, initial, opts = {}) => {
   return [value, setValue];
 };
 
-// All prices in the app come from PriceCharting. Raw = PC `loose-price`.
-// Returns 0 if the card's variant hasn't been resolved yet — viewport-based
-// lazy resolution will eventually populate it and components re-render via
-// the onVariantResolved emitter.
-// Raw market price for a card. TCGCSV (TCGPlayer market) is the source of
-// truth post-2026-05-27. Falls back to PriceCharting's cached `loose-price`
-// during the transition window so cards that were resolved via PC but don't
-// yet have a TCGCSV snapshot still show a price. Returns 0 when nothing is
-// known — viewport-based lazy fetches will eventually populate.
+// Raw market price for a card. Source of truth is TCGCSV (TCGPlayer market)
+// via src/pricing.js. Returns 0 when the card hasn't been resolved to a
+// TCGPlayer productId yet, or the price snapshot isn't cached — the
+// viewport-based lazy fetch in useEnhancedImage eventually populates it
+// and components re-render via the onPriceResolved emitter.
 const effectiveRawPrice = (card) => {
   if (!card) return 0;
-  const tcgcsv = getMarketPriceForCard(card);
-  if (tcgcsv != null) return tcgcsv;
-  return getCachedLoosePrice(card.canonicalId || card.id) ?? 0;
+  return getMarketPriceForCard(card) ?? 0;
 };
 
-// Dedup in-flight PriceCharting fetches across components in the same tick.
-const inFlightLookups = new Map();
-// useEnhancedImage: returns [ref, url]. Attach ref to the rendered element so
-// PriceCharting fetches only fire when the card scrolls into the viewport
-// (with a 200px margin so we pre-fetch just before it appears). Pass
-// `needsVariant: true` when the caller needs cached price tiers — the hook
-// will also fetch the variant snapshot when in view, even if the image is
-// already present. Re-renders driven by the parent's `variantRev` (via
-// `onVariantResolved`) propagate fresh tier prices to children.
-const useEnhancedImage = (card, opts = {}) => {
-  // Prices in this app come from PriceCharting (loose-price, tier fields),
-  // so we always want a variant snapshot for any visible card. Image-only
-  // fetches are no longer enough — needsVariant defaults to true.
-  const needsVariant = opts.needsVariant !== false;
+// useEnhancedImage: returns [ref, url]. Attach ref to the rendered element
+// so we only kick off a price fetch when the card scrolls into the viewport
+// (with a 200px margin so we pre-fetch just before it appears). Image
+// fallback comes from the saved TCGCSV resolution (or the TCGPlayer CDN
+// constructed from tcg_id) when OPTCGAPI didn't supply card.imageUrl.
+const useEnhancedImage = (card) => {
   const ref = useRef(null);
-  const cacheKeyOf = (c) => c?.canonicalId || c?.id;
-  const synchronousImage = card?.imageUrl || (card ? getCachedImage(cacheKeyOf(card)) : null);
+  const synchronousImage = card?.imageUrl || (card ? getCachedImageForCard(card) : null);
   const needsImage = !synchronousImage;
-  const needsFetch = needsImage || (needsVariant && card && !isVariantSnapshotFresh(cacheKeyOf(card)));
   const [url, setUrl] = useState(synchronousImage);
-  const [inView, setInView] = useState(!needsFetch);
+  const [inView, setInView] = useState(!needsImage);
 
   useEffect(() => {
-    if (inView || !ref.current || !needsFetch) return;
+    if (inView || !ref.current) return;
     const el = ref.current;
     const obs = new IntersectionObserver(([entry]) => {
       if (entry.isIntersecting) { setInView(true); obs.disconnect(); }
     }, { rootMargin: '200px' });
     obs.observe(el);
     return () => obs.disconnect();
-  }, [inView, needsFetch]);
+  }, [inView]);
 
   useEffect(() => {
     if (!card) return;
-    const freshImage = card.imageUrl || getCachedImage(cacheKeyOf(card));
-    if (freshImage && freshImage !== url) setUrl(freshImage);
+    const fallback = card.imageUrl || getCachedImageForCard(card);
+    if (fallback && fallback !== url) setUrl(fallback);
     if (!inView) return;
-    // Warm the TCGCSV market-price cache for any card that has a tcg_id
-    // mapping. Fire-and-forget; the onPriceResolved emitter triggers
-    // re-renders downstream. Independent of the PriceCharting fetch below.
+    // Warm the TCGCSV market-price cache for any card with a known tcg_id.
+    // Fire-and-forget; onPriceResolved triggers downstream re-renders.
     ensurePriceForCard(card);
-    if (!needsFetch || !hasToken()) return;
-    let cancelled = false;
-    const cacheKey = cacheKeyOf(card);
-    const fetcher = needsImage ? resolveEnhancedImage : resolveVariantSnapshot;
-    const existing = inFlightLookups.get(cacheKey);
-    const promise = existing || fetcher(card);
-    if (!existing) inFlightLookups.set(cacheKey, promise);
-    promise.then(resolved => {
-      inFlightLookups.delete(cacheKey);
-      if (cancelled) return;
-      // resolveEnhancedImage returns a URL string; resolveVariantSnapshot returns boolean
-      if (needsImage && typeof resolved === 'string' && resolved) setUrl(resolved);
-      // After PC resolves a card we get a tcg_id; immediately warm the
-      // TCGCSV cache so the price card shows real numbers without another
-      // viewport pass.
-      if (resolved) ensurePriceForCard(card);
-    });
-    return () => { cancelled = true; };
-  }, [card, inView, needsFetch, needsImage]);
+  }, [card, inView, url]);
 
   return [ref, url];
 };
@@ -124,6 +84,17 @@ const RARITY_LABELS = {
   UC: 'Uncommon', C: 'Common', P: 'Promo', SP: 'Special', TR: 'Treasure',
 };
 const CONDITIONS = ['Mint', 'Near Mint', 'Lightly Played', 'Moderately Played', 'Heavily Played', 'Damaged'];
+
+// Grading companies + per-company allowed grades. Pure UI data — the app no
+// longer auto-fetches graded prices, so these only populate the dropdowns
+// in AddCardModal's grading section. Half-grades only meaningful at 9.5.
+const GRADING_COMPANIES = ['PSA', 'BGS', 'CGC', 'SGC'];
+const GRADES_BY_COMPANY = {
+  PSA: [10, 9.5, 9, 8, 7],
+  BGS: [10, 9.5, 9, 8, 7],
+  CGC: [10, 9.5, 9, 8, 7],
+  SGC: [10, 9.5, 9, 8, 7],
+};
 
 const uid = () => Math.random().toString(36).slice(2, 10);
 
@@ -163,11 +134,11 @@ export default function App() {
     })();
   }, []);
 
-  // Pull shared-mode card resolutions into the local cache, then subscribe
+  // Pull shared-mode TCGCSV resolutions into the local cache, then subscribe
   // to real-time updates from teammates. No-ops in solo mode.
   useEffect(() => {
-    hydrateFromShared().catch(() => {});
-    const unsub = subscribeResolutions();
+    hydrateResolutionsFromShared().catch(() => {});
+    const unsub = subscribeToSharedResolutions();
     return () => unsub();
   }, []);
 
@@ -199,6 +170,10 @@ export default function App() {
         // doesn't briefly show pre-migration card_ids that don't index into
         // the (canonical-keyed) catalog.
         await runCanonicalMigration();
+        // Promote legacy PriceCharting tcg_id mappings into the new TCGCSV
+        // resolution cache, then drop the PC localStorage keys. Sync — fast
+        // and no network.
+        runPcCleanup();
         await refreshData();
       } finally { setLoading(false); }
     })();
@@ -214,13 +189,11 @@ export default function App() {
   // augmented catalog recomputes and twins appear/disappear in search.
   const [erratTick, setErratTick] = useState(0);
 
-  // variantRev increments whenever ANY card's PriceCharting variant snapshot
-  // lands in the cache. We use it as a useMemo dep so derived computations
-  // (collection stats, equity, sort orders) re-read fresh PC prices.
+  // variantRev increments whenever any card's TCGCSV price snapshot lands
+  // in the cache. Used as a useMemo dep so derived computations (collection
+  // stats, equity, sort orders) re-read fresh prices. The name is a holdover
+  // from the PriceCharting era; semantically it's a "prices changed" tick.
   const [variantRev, setVariantRev] = useState(0);
-  useEffect(() => onVariantResolved(() => setVariantRev(r => r + 1)), []);
-  // TCGCSV price snapshots also drive derived recomputes (equity NAV, sort
-  // orders, collection stats). Same dep handle, different upstream.
   useEffect(() => onPriceResolved(() => setVariantRev(r => r + 1)), []);
   const augmentedCatalog = useMemo(
     () => augmentWithErrata(catalog),
