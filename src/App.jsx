@@ -1959,7 +1959,10 @@ function AddByCertModal({ catalog, collections, activeCollectionId, onClose, onS
   };
 
   const matchedCard = candidates.find(c => c.id === selectedCardId) || candidates[0] || null;
-  const card = matchedCard || (overrideCardId ? catalog.find(c => c.id === overrideCardId) : null);
+  // Manual override beats the auto-matched candidate when the user explicitly
+  // picks something from the catalog search.
+  const overrideCard = overrideCardId ? catalog.find(c => c.id === overrideCardId) : null;
+  const card = overrideCard || matchedCard;
 
   const handleSave = async () => {
     if (!cert || !card) return;
@@ -2053,7 +2056,7 @@ function AddByCertModal({ catalog, collections, activeCollectionId, onClose, onS
                 }, null, 2)}</pre>
               </details>
 
-              {matchedCard ? (
+              {matchedCard && (
                 <div className="op-cert-match">
                   <CardArt card={matchedCard} />
                   <div className="op-cert-match-meta">
@@ -2074,12 +2077,12 @@ function AddByCertModal({ catalog, collections, activeCollectionId, onClose, onS
                             key={c.id}
                             type="button"
                             className={`op-cert-pick ${selectedCardId === c.id ? 'is-active' : ''}`}
-                            onClick={() => setSelectedCardId(c.id)}
+                            onClick={() => { setSelectedCardId(c.id); setOverrideCardId(''); }}
                             title={c.fullName || c.name}
                           >
-                            {c.variant
-                              ? <><span className="op-entry-id">{c.displayId || c.id}</span> {c.variant}</>
-                              : <><span className="op-entry-id">{c.displayId || c.id}</span> {c.isParallel ? 'Parallel' : 'Base'}</>}
+                            <span className="op-entry-id">{c.displayId || c.id}</span>
+                            {' · '}{c.setId}
+                            {c.variant ? ` · ${c.variant}` : (c.isParallel ? ' · Parallel' : '')}
                             {' · '}{RARITY_LABELS[c.rarity] || c.rarity}
                           </button>
                         ))}
@@ -2087,33 +2090,41 @@ function AddByCertModal({ catalog, collections, activeCollectionId, onClose, onS
                     )}
                   </div>
                 </div>
-              ) : (
-                <div className="op-graded-caveat">
-                  PSA returned card number <strong>{cert.card_number || '?'}</strong> but it didn't match anything in your catalog. Pick the right card below.
-                  <div style={{ marginTop: 8 }}>
-                    <input
-                      type="text"
-                      placeholder="Search catalog by name or ID…"
-                      value={pickerQ}
-                      onChange={(e) => setPickerQ(e.target.value)}
-                      style={{ width: '100%', padding: '6px 10px', border: '1px solid var(--line-strong)', background: 'var(--paper)' }}
-                    />
-                    {pickerResults.length > 0 && (
-                      <div className="op-cert-picker">
-                        {pickerResults.map(c => (
-                          <button
-                            key={c.id}
-                            className={`op-cert-pick ${overrideCardId === c.id ? 'is-active' : ''}`}
-                            onClick={() => { setOverrideCardId(c.id); setPickerQ(`${c.displayId || c.id} ${c.name}`); }}
-                          >
-                            <span className="op-entry-id">{c.displayId || c.id}</span> {c.name} · {c.setName}
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                </div>
               )}
+
+              <details className="op-cert-manual" {...(matchedCard ? {} : { open: true })}>
+                <summary>
+                  {matchedCard
+                    ? "Wrong card? Search the catalog manually"
+                    : `PSA returned card number ${cert.card_number || '?'} but nothing in the catalog matched. Pick the right card.`}
+                </summary>
+                <div style={{ marginTop: 8 }}>
+                  <input
+                    type="text"
+                    placeholder="Search catalog by name or ID…"
+                    value={pickerQ}
+                    onChange={(e) => setPickerQ(e.target.value)}
+                    style={{ width: '100%', padding: '6px 10px', border: '1px solid var(--line-strong)', background: 'var(--paper)' }}
+                  />
+                  {pickerResults.length > 0 && (
+                    <div className="op-cert-picker">
+                      {pickerResults.map(c => (
+                        <button
+                          key={c.id}
+                          className={`op-cert-pick ${overrideCardId === c.id ? 'is-active' : ''}`}
+                          onClick={() => {
+                            setOverrideCardId(c.id);
+                            setSelectedCardId('');
+                            setPickerQ(`${c.displayId || c.id} ${c.name}`);
+                          }}
+                        >
+                          <span className="op-entry-id">{c.displayId || c.id}</span> {c.name} · {c.setName}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </details>
 
               <div className="op-form-row">
                 <Field label="Collection">
