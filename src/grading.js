@@ -50,7 +50,7 @@ export const GRADES_BY_COMPANY = {
 };
 
 // Returns the PriceCharting field name for a (company, grade) combo, or null.
-export const fieldForGrade = (company, grade) => {
+const fieldForGrade = (company, grade) => {
   const g = Number(grade);
   if (g === 10) {
     if (company === 'PSA') return 'manual-only-price';
@@ -233,12 +233,6 @@ export const getCachedLoosePrice = (cardId) => {
   return pennies > 0 ? pennies / 100 : null;
 };
 
-// True if we have a variant snapshot for this card (regardless of staleness).
-export const hasCachedVariant = (cardId) => {
-  const cache = readCache(VARIANT_CACHE_KEY, {});
-  return Boolean(cache[cardId]);
-};
-
 // True if the cached variant snapshot is fresh enough that we shouldn't refetch.
 export const isVariantSnapshotFresh = (cardId) => {
   const cache = readCache(VARIANT_CACHE_KEY, {});
@@ -317,15 +311,16 @@ export const subscribeResolutions = () => {
 // returns the CDN URL.
 export const resolveEnhancedImage = async (card) => {
   if (!TOKEN) return null;
-  const cached = getCachedImage(card.id);
+  const cid = card.canonicalId || card.id;
+  const cached = getCachedImage(cid);
   if (cached) return cached;
   try {
     const matches = await searchVariants(card);
     if (matches.length === 0) return null;
     const best = matches.find(m => m['tcg-id']) || matches[0];
-    saveVariantSnapshot(card.id, best);
+    saveVariantSnapshot(cid, best);
     if (!best['tcg-id']) return null;
-    saveImage(card.id, best['tcg-id']);
+    saveImage(cid, best['tcg-id']);
     return tcgImageUrl(best['tcg-id']);
   } catch {
     return null;
@@ -337,13 +332,14 @@ export const resolveEnhancedImage = async (card) => {
 // we still need graded prices for the "Price as" toggle.
 export const resolveVariantSnapshot = async (card) => {
   if (!TOKEN) return false;
-  if (isVariantSnapshotFresh(card.id)) return true;
+  const cid = card.canonicalId || card.id;
+  if (isVariantSnapshotFresh(cid)) return true;
   try {
     const matches = await searchVariants(card);
     if (matches.length === 0) return false;
     const best = matches.find(m => m['tcg-id']) || matches[0];
-    saveVariantSnapshot(card.id, best);
-    if (best['tcg-id']) saveImage(card.id, best['tcg-id']);
+    saveVariantSnapshot(cid, best);
+    if (best['tcg-id']) saveImage(cid, best['tcg-id']);
     return true;
   } catch {
     return false;

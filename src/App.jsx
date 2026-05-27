@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef, useCallback, useReducer } from 'react';
+import { useState, useEffect, useMemo, useRef, useCallback, useReducer } from 'react';
 import { Search, Plus, X, TrendingUp, TrendingDown, Folder, Trash2, DollarSign, Anchor, ChevronRight, Package, BarChart3, RefreshCw, Cloud, HardDrive, ImageOff, Award, Loader2, Pencil, Eye, EyeOff } from 'lucide-react';
 import { store, MODE, VAULT_LABEL } from './storage.js';
 import { loadCatalog, loadPriceHistory, groupBySet, compareSets, augmentWithErrata, hasPreErrata, togglePreErrata } from './catalog.js';
@@ -10,7 +10,9 @@ import {
   PRICE_TIERS, getCachedTierPrice, getCachedLoosePrice, isVariantSnapshotFresh, resolveVariantSnapshot,
   onVariantResolved, hydrateFromShared, subscribeResolutions,
 } from './grading.js';
-import { hasPsaToken, fetchCert, matchCatalogCard, findCandidateCards } from './psa.js';
+import { hasPsaToken, fetchCert, findCandidateCards } from './psa.js';
+import { runCanonicalMigration } from './migrate.js';
+import { getMarketPriceForCard, ensurePriceForCard, onPriceResolved } from './pricing.js';
 
 // Like useState, but persists to localStorage. `serialize`/`deserialize` are
 // optional escape hatches for non-JSON-friendly values (e.g. Sets).
@@ -33,32 +35,39 @@ const useStoredState = (key, initial, opts = {}) => {
 // Returns 0 if the card's variant hasn't been resolved yet — viewport-based
 // lazy resolution will eventually populate it and components re-render via
 // the onVariantResolved emitter.
+// Raw market price for a card. TCGCSV (TCGPlayer market) is the source of
+// truth post-2026-05-27. Falls back to PriceCharting's cached `loose-price`
+// during the transition window so cards that were resolved via PC but don't
+// yet have a TCGCSV snapshot still show a price. Returns 0 when nothing is
+// known — viewport-based lazy fetches will eventually populate.
 const effectiveRawPrice = (card) => {
   if (!card) return 0;
-  return getCachedLoosePrice(card.id) ?? 0;
+  const tcgcsv = getMarketPriceForCard(card);
+  if (tcgcsv != null) return tcgcsv;
+  return getCachedLoosePrice(card.canonicalId || card.id) ?? 0;
 };
 
 // Dedup in-flight PriceCharting fetches across components in the same tick.
 const inFlightLookups = new Map();
-// useEnhancedImage: returns [ref, url, variantTick]. Attach ref to the rendered
-// element so PriceCharting fetches only fire when the card scrolls into the
-// viewport (with a 200px margin so we pre-fetch just before it appears).
-// Pass `needsVariant: true` when the caller needs cached price tiers — the
-// hook will also fetch the variant snapshot when in view, even if the image
-// is already present. variantTick increments when a variant is resolved so
-// consumers can re-read from the cache.
+// useEnhancedImage: returns [ref, url]. Attach ref to the rendered element so
+// PriceCharting fetches only fire when the card scrolls into the viewport
+// (with a 200px margin so we pre-fetch just before it appears). Pass
+// `needsVariant: true` when the caller needs cached price tiers — the hook
+// will also fetch the variant snapshot when in view, even if the image is
+// already present. Re-renders driven by the parent's `variantRev` (via
+// `onVariantResolved`) propagate fresh tier prices to children.
 const useEnhancedImage = (card, opts = {}) => {
   // Prices in this app come from PriceCharting (loose-price, tier fields),
   // so we always want a variant snapshot for any visible card. Image-only
   // fetches are no longer enough — needsVariant defaults to true.
   const needsVariant = opts.needsVariant !== false;
   const ref = useRef(null);
-  const synchronousImage = card?.imageUrl || (card ? getCachedImage(card.id) : null);
+  const cacheKeyOf = (c) => c?.canonicalId || c?.id;
+  const synchronousImage = card?.imageUrl || (card ? getCachedImage(cacheKeyOf(card)) : null);
   const needsImage = !synchronousImage;
-  const needsFetch = needsImage || (needsVariant && card && !isVariantSnapshotFresh(card.id));
+  const needsFetch = needsImage || (needsVariant && card && !isVariantSnapshotFresh(cacheKeyOf(card)));
   const [url, setUrl] = useState(synchronousImage);
   const [inView, setInView] = useState(!needsFetch);
-  const [variantTick, setVariantTick] = useState(0);
 
   useEffect(() => {
     if (inView || !ref.current || !needsFetch) return;
@@ -72,11 +81,16 @@ const useEnhancedImage = (card, opts = {}) => {
 
   useEffect(() => {
     if (!card) return;
-    const freshImage = card.imageUrl || getCachedImage(card.id);
+    const freshImage = card.imageUrl || getCachedImage(cacheKeyOf(card));
     if (freshImage && freshImage !== url) setUrl(freshImage);
-    if (!inView || !needsFetch || !hasToken()) return;
+    if (!inView) return;
+    // Warm the TCGCSV market-price cache for any card that has a tcg_id
+    // mapping. Fire-and-forget; the onPriceResolved emitter triggers
+    // re-renders downstream. Independent of the PriceCharting fetch below.
+    ensurePriceForCard(card);
+    if (!needsFetch || !hasToken()) return;
     let cancelled = false;
-    const cacheKey = card.id;
+    const cacheKey = cacheKeyOf(card);
     const fetcher = needsImage ? resolveEnhancedImage : resolveVariantSnapshot;
     const existing = inFlightLookups.get(cacheKey);
     const promise = existing || fetcher(card);
@@ -86,12 +100,15 @@ const useEnhancedImage = (card, opts = {}) => {
       if (cancelled) return;
       // resolveEnhancedImage returns a URL string; resolveVariantSnapshot returns boolean
       if (needsImage && typeof resolved === 'string' && resolved) setUrl(resolved);
-      if (resolved) setVariantTick(t => t + 1);
+      // After PC resolves a card we get a tcg_id; immediately warm the
+      // TCGCSV cache so the price card shows real numbers without another
+      // viewport pass.
+      if (resolved) ensurePriceForCard(card);
     });
     return () => { cancelled = true; };
   }, [card, inView, needsFetch, needsImage]);
 
-  return [ref, url, variantTick];
+  return [ref, url];
 };
 
 const COLOR_TOKENS = {
@@ -174,8 +191,14 @@ export default function App() {
 
   useEffect(() => {
     (async () => {
-      try { await refreshData(); }
-      finally { setLoading(false); }
+      try {
+        // Rewrites legacy OPTCG card_ids to canonical form on first run, then
+        // no-ops on subsequent loads. Must run before refreshData so the UI
+        // doesn't briefly show pre-migration card_ids that don't index into
+        // the (canonical-keyed) catalog.
+        await runCanonicalMigration();
+        await refreshData();
+      } finally { setLoading(false); }
     })();
     // Realtime sync (shared mode only)
     const unsubC = store.subscribe('collections', refreshData);
@@ -194,6 +217,9 @@ export default function App() {
   // (collection stats, equity, sort orders) re-read fresh PC prices.
   const [variantRev, setVariantRev] = useState(0);
   useEffect(() => onVariantResolved(() => setVariantRev(r => r + 1)), []);
+  // TCGCSV price snapshots also drive derived recomputes (equity NAV, sort
+  // orders, collection stats). Same dep handle, different upstream.
+  useEffect(() => onPriceResolved(() => setVariantRev(r => r + 1)), []);
   const augmentedCatalog = useMemo(
     () => augmentWithErrata(catalog),
     // erratTick is read inside augmentWithErrata via readErrataSet()
@@ -201,9 +227,15 @@ export default function App() {
   );
 
   // Quick catalog lookup (uses augmented list so entries can resolve to twins).
+  // Keyed by canonicalId — that's what every DB row's card_id resolves to
+  // post-migration. The catalog card object still exposes its OPTCG-style
+  // `id` for cache keys, React keys, image loading, etc.; canonicalId is
+  // the cross-source-stable identity used for joins.
   const catalogIndex = useMemo(() => {
     const m = new Map();
-    for (const c of augmentedCatalog) m.set(c.id, c);
+    for (const c of augmentedCatalog) {
+      if (c.canonicalId) m.set(c.canonicalId, c);
+    }
     return m;
   }, [augmentedCatalog]);
 
@@ -328,10 +360,11 @@ export default function App() {
   };
 
   const addToWatchlist = async (card, opts = {}) => {
-    if (watchlist.some(w => w.card_id === card.id)) return;
+    const cid = card.canonicalId || card.id;
+    if (watchlist.some(w => w.card_id === cid)) return;
     const created = await store.insert('watchlist', {
       id: uid(),
-      card_id: card.id,
+      card_id: cid,
       card_display_name: card.name ? `${card.displayId || card.id} ${card.name}` : (card.displayId || card.id),
       target_price: opts.target_price ?? null,
       notes: opts.notes || '',
@@ -441,10 +474,12 @@ export default function App() {
           <SearchView
             catalog={augmentedCatalog}
             watchlist={watchlist}
+            variantRev={variantRev}
             onAddCard={setAddingCard}
             onCardClick={setDetailCard}
             onToggleWatch={async (card) => {
-              const existing = watchlist.find(w => w.card_id === card.id);
+              const cid = card.canonicalId || card.id;
+              const existing = watchlist.find(w => w.card_id === cid);
               if (existing) await removeFromWatchlist(existing.id);
               else await addToWatchlist(card);
             }}
@@ -553,17 +588,19 @@ export default function App() {
         );
       })()}
 
-      {detailCard && (
+      {detailCard && (() => {
+        const detailCid = detailCard.canonicalId || detailCard.id;
+        return (
         <CardDetailDrawer
           card={detailCard}
-          entries={entries.filter(e => e.card_id === detailCard.id)}
+          entries={entries.filter(e => e.card_id === detailCid)}
           collections={collections}
-          watchEntry={watchlist.find(w => w.card_id === detailCard.id) || null}
+          watchEntry={watchlist.find(w => w.card_id === detailCid) || null}
           onClose={() => setDetailCard(null)}
           onAddToCollection={() => { setAddingCard(detailCard); setDetailCard(null); }}
           onRemoveEntry={removeEntry}
           onToggleWatch={() => {
-            const existing = watchlist.find(w => w.card_id === detailCard.id);
+            const existing = watchlist.find(w => w.card_id === detailCid);
             if (existing) removeFromWatchlist(existing.id);
             else addToWatchlist(detailCard);
           }}
@@ -576,7 +613,8 @@ export default function App() {
             setErratTick(t => t + 1);
           }}
         />
-      )}
+        );
+      })()}
 
       <ModeIndicator />
     </div>
@@ -1383,7 +1421,7 @@ function CardThumb({ card, size = 60 }) {
 }
 
 // ============================================================================
-function SearchView({ catalog, watchlist = [], onAddCard, onCardClick, onToggleWatch = () => {} }) {
+function SearchView({ catalog, watchlist = [], variantRev = 0, onAddCard, onCardClick, onToggleWatch = () => {} }) {
   const watchedIds = useMemo(() => new Set(watchlist.map(w => w.card_id)), [watchlist]);
   const [q, setQ] = useStoredState('optcg:search:q', '');
   const [setFilter, setSetFilter] = useStoredState('optcg:search:setFilter', 'all');
@@ -1506,7 +1544,9 @@ function SearchView({ catalog, watchlist = [], onAddCard, onCardClick, onToggleW
       return (a.id || '').localeCompare(b.id || '');
     });
     return arr;
-  }, [filtered, sortBy]);
+    // variantRev forces the array to re-create when fresh prices land, so
+    // tiles re-render with the latest cached price too.
+  }, [filtered, sortBy, variantRev]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // When sorting by set, group; otherwise flat list
   const grouped = useMemo(() => sortBy === 'set' ? groupBySet(sorted) : null, [sortBy, sorted]);
@@ -1633,7 +1673,7 @@ function SearchView({ catalog, watchlist = [], onAddCard, onCardClick, onToggleW
               onAddCard={onAddCard}
               onCardClick={onCardClick}
               onToggleWatch={onToggleWatch}
-              isWatched={watchedIds.has(card.id)}
+              isWatched={watchedIds.has(card.canonicalId || card.id)}
               priceTier={priceTier}
             />
           ))}
@@ -1955,7 +1995,7 @@ function AddByCertModal({ catalog, collections, activeCollectionId, onClose, onS
     if (!cert || !card) return;
     setSaving(true);
     await onSave({
-      card_id: card.id,
+      card_id: card.canonicalId || card.id,
       collection_id: collectionId,
       condition: 'Near Mint',
       purchase_price: Number(purchasePrice) || 0,
@@ -2420,7 +2460,7 @@ function BulkGradingModal({ entries, catalogIndex, members = [], collectionId, o
       }));
       await onSave({
         type: 'expense',
-        card_id: card.id,
+        card_id: card.canonicalId || card.id,
         entry_id: entry.id,
         collection_id: entry.collection_id,
         card_display_name: `Grading · ${card.displayId || card.id} ${card.name}`,
@@ -2830,11 +2870,12 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
 
   const queue = useMemo(() => {
     if (filterMode === 'in-collection') {
+      // entries.card_id is canonical post-migration; match against canonicalId.
       const ids = new Set(entries.map(e => e.card_id));
-      return catalog.filter(c => ids.has(c.id));
+      return catalog.filter(c => ids.has(c.canonicalId || c.id));
     }
     if (filterMode === 'unresolved') {
-      return catalog.filter(c => !isVariantSnapshotFresh(c.id));
+      return catalog.filter(c => !isVariantSnapshotFresh(c.canonicalId || c.id));
     }
     return catalog;
   }, [catalog, entries, filterMode]);
@@ -2842,7 +2883,7 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
   const runPrefetch = async () => {
     if (prefetching) return;
     if (!hasToken()) { alert('PriceCharting token missing — set VITE_PRICECHARTING_TOKEN.'); return; }
-    const targets = catalog.filter(c => !isVariantSnapshotFresh(c.id));
+    const targets = catalog.filter(c => !isVariantSnapshotFresh(c.canonicalId || c.id));
     if (targets.length === 0) { alert('Everything is already resolved.'); return; }
     if (!confirm(`Prefetch ${targets.length.toLocaleString()} unresolved card${targets.length === 1 ? '' : 's'} from PriceCharting? This may take several minutes.`)) return;
     abortRef.current = false;
@@ -2896,7 +2937,7 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
       if (matches.length === 0) {
         setError(`No PriceCharting match for ${currentCard.displayId || currentCard.id}.`);
       } else {
-        const saved = getSavedPick(currentCard.id);
+        const saved = getSavedPick(currentCard.canonicalId || currentCard.id);
         const chosen = (saved && matches.find(v => String(v.id) === saved.id)) || matches[0];
         setSelectedPickId(String(chosen.id));
       }
@@ -2911,7 +2952,7 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
   const selected = variants.find(v => String(v.id) === selectedPickId);
 
   const handleSave = () => {
-    if (selected && currentCard) savePick(currentCard.id, selected);
+    if (selected && currentCard) savePick(currentCard.canonicalId || currentCard.id, selected);
     setIndex(i => i + 1);
   };
   const handleSkip = () => setIndex(i => i + 1);
@@ -3075,7 +3116,7 @@ function SetGroup({ group, onAddCard, onCardClick, onToggleWatch, watchedIds = n
               onAddCard={onAddCard}
               onCardClick={onCardClick}
               onToggleWatch={onToggleWatch}
-              isWatched={watchedIds.has(card.id)}
+              isWatched={watchedIds.has(card.canonicalId || card.id)}
               priceTier={priceTier}
             />
           ))}
@@ -3088,13 +3129,14 @@ function SetGroup({ group, onAddCard, onCardClick, onToggleWatch, watchedIds = n
 function CardTile({ card, onAddCard, onCardClick, onToggleWatch = () => {}, isWatched = false, priceTier = 'raw' }) {
   const showTier = priceTier && priceTier !== 'raw';
   const tierMeta = PRICE_TIERS.find(t => t.value === priceTier);
+  const cid = card.canonicalId || card.id;
   // Force re-read of the variant cache when this card's snapshot lands.
   const [, bumpTick] = useReducer(x => x + 1, 0);
   useEffect(() => {
     if (!showTier) return;
-    return onVariantResolved((id) => { if (id === card.id) bumpTick(); });
-  }, [card.id, showTier]);
-  const tierPrice = showTier ? getCachedTierPrice(card.id, priceTier) : null;
+    return onVariantResolved((id) => { if (id === cid) bumpTick(); });
+  }, [cid, showTier]);
+  const tierPrice = showTier ? getCachedTierPrice(cid, priceTier) : null;
   return (
     <div className="op-card-tile">
       <button className="op-card-tile-main" onClick={() => onCardClick(card)}>
@@ -3253,7 +3295,7 @@ function AddCardModal({ card, entry, collections, activeCollectionId, onClose, o
         setPcProductName('');
         return;
       }
-      const saved = getSavedPick(card.id);
+      const saved = getSavedPick(card.canonicalId || card.id);
       const chosen = (saved && list.find(v => String(v.id) === saved.id)) || list[0];
       setPcProductId(String(chosen.id));
       setPcProductName(chosen['product-name']);
@@ -3308,9 +3350,10 @@ function AddCardModal({ card, entry, collections, activeCollectionId, onClose, o
 
   const handleSave = async () => {
     setSaving(true);
-    if (isGraded && selectedVariant) savePick(card.id, selectedVariant);
+    const cid = card.canonicalId || card.id;
+    if (isGraded && selectedVariant) savePick(cid, selectedVariant);
     const payload = {
-      card_id: card.id,
+      card_id: cid,
       collection_id: collectionId,
       condition,
       purchase_price: priceNum,
@@ -3350,7 +3393,7 @@ function AddCardModal({ card, entry, collections, activeCollectionId, onClose, o
             <div className="op-modal-market">
               Raw: <strong>${effectiveRawPrice(card).toFixed(2)}</strong>
               {(() => {
-                const p = getCachedTierPrice(card.id, 'psa10');
+                const p = getCachedTierPrice(card.canonicalId || card.id, 'psa10');
                 return p != null ? <> · PSA 10: <strong>${p.toFixed(2)}</strong></> : null;
               })()}
             </div>
@@ -3609,7 +3652,7 @@ function CardDetailDrawer({ card, entries, collections, watchEntry, onClose, onA
             <PriceCell
               label="PSA 10"
               value={(() => {
-                const p = getCachedTierPrice(card.id, 'psa10');
+                const p = getCachedTierPrice(card.canonicalId || card.id, 'psa10');
                 return p != null ? `$${p.toFixed(2)}` : '—';
               })()}
             />

@@ -13,7 +13,9 @@
 // ============================================================================
 
 const API = 'https://optcgapi.com/api';
-const CACHE_KEY = 'optcg:catalog:v7';
+// v8 bumps the cache key after adding canonicalId to each card object —
+// older cached entries don't have it and would break canonical-id lookups.
+const CACHE_KEY = 'optcg:catalog:v8';
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24h
 const HISTORY_PREFIX = 'optcg:history:';
 const HISTORY_TTL_MS = 6 * 60 * 60 * 1000; // 6h
@@ -47,6 +49,43 @@ const extractParen = (fullName) => {
   return m[1].trim();
 };
 
+// Build the source-stable canonical id for a normalized card object.
+// Format: [<sourceSet>:]<displayId>[-<variantTag>]
+//   - sourceSet prefix is included only when it differs from the identity
+//     set baked into displayId. So a base OP11-118 stays "OP11-118"; an OP12
+//     reprint of ST01-004 becomes "OP12:ST01-004"; a PROMO printing of
+//     OP09-077 becomes "PROMO:OP09-077-<tag>".
+//   - variantTag is parallel-index (p1, p2…), our pre-errata flag, or the
+//     slugified promo variant.
+//
+// Pass a card after augmentWithErrata if you want the pre-errata twin's
+// canonical id (its variantTag is set there).
+export const canonicalIdOf = (card) => {
+  if (!card) return '';
+  const display = card.displayId || card.id || '';
+  // OPTCGAPI gives us set ids like "OP-12"; strip the dash so we can prefix
+  // cleanly and compare against the displayId's leading set token.
+  const sourceNorm = (card.setId || '').replace(/-/g, '');
+  const identityPrefix = display.split('-')[0];
+
+  // Variant tag: pre-errata flag wins, then a _p\d suffix on imageId/id, then
+  // any explicit promo variantTag we already computed in normalize().
+  let variantTag = '';
+  if (card.variantTag === 'pre-errata') {
+    variantTag = 'pre-errata';
+  } else {
+    const parallelMatch = (card.imageId || card.id || '').match(/_p(\d+)$/i);
+    if (parallelMatch) variantTag = `p${parallelMatch[1]}`;
+    else if (card.variantTag) variantTag = card.variantTag;
+  }
+  const variantSuffix = variantTag ? `-${variantTag}` : '';
+
+  if (sourceNorm && identityPrefix && sourceNorm !== identityPrefix) {
+    return `${sourceNorm}:${display}${variantSuffix}`;
+  }
+  return `${display}${variantSuffix}`;
+};
+
 // Normalize one card response into our shape
 const normalize = (raw, sourceType) => {
   const baseId = raw.card_set_id || raw.card_id || raw.don_id || raw.card_image_id;
@@ -68,33 +107,35 @@ const normalize = (raw, sourceType) => {
   // booster group. We preserve the original set on `originalSetId` for ref.
   const groupSetId = sourceType === 'promo' ? 'PROMO' : (raw.set_id || defaultSetId(sourceType));
   const groupSetName = sourceType === 'promo' ? 'Promo' : (raw.set_name || defaultSetName(sourceType));
-  return ({
-  id,
-  displayId: baseId,
-  variantTag: tag,
-  variant: variant || '',
-  name: cleanedName,
-  fullName: raw.optcg_don_name || raw.card_name,
-  setId: groupSetId,
-  setName: groupSetName,
-  originalSetId: raw.set_id || '',
-  rarity: raw.rarity,
-  type: raw.card_type,
-  color: raw.card_color,
-  cost: raw.card_cost,
-  power: raw.card_power,
-  life: raw.life,
-  counter: raw.counter_amount,
-  attribute: raw.attribute,
-  subTypes: raw.sub_types,
-  text: raw.card_text,
-  marketPrice: Number(raw.market_price) || 0,
-  inventoryPrice: Number(raw.inventory_price) || 0,
-  imageUrl: raw.card_image,
-  imageId: raw.card_image_id || id,
-  isParallel: /\(Parallel\)|\(Alternate\)|_p\d/i.test(raw.card_name || '') || /_p\d/i.test(raw.card_image_id || ''),
-  source: sourceType,
-});
+  const card = {
+    id,
+    displayId: baseId,
+    variantTag: tag,
+    variant: variant || '',
+    name: cleanedName,
+    fullName: raw.optcg_don_name || raw.card_name,
+    setId: groupSetId,
+    setName: groupSetName,
+    originalSetId: raw.set_id || '',
+    rarity: raw.rarity,
+    type: raw.card_type,
+    color: raw.card_color,
+    cost: raw.card_cost,
+    power: raw.card_power,
+    life: raw.life,
+    counter: raw.counter_amount,
+    attribute: raw.attribute,
+    subTypes: raw.sub_types,
+    text: raw.card_text,
+    marketPrice: Number(raw.market_price) || 0,
+    inventoryPrice: Number(raw.inventory_price) || 0,
+    imageUrl: raw.card_image,
+    imageId: raw.card_image_id || id,
+    isParallel: /\(Parallel\)|\(Alternate\)|_p\d/i.test(raw.card_name || '') || /_p\d/i.test(raw.card_image_id || ''),
+    source: sourceType,
+  };
+  card.canonicalId = canonicalIdOf(card);
+  return card;
 };
 
 let catalogPromise = null;
@@ -170,7 +211,9 @@ const revalidateCatalog = async () => {
     } catch {
       // localStorage might be full — strip down to essentials
       const slim = final.map(c => ({
-        id: c.id, name: c.name, fullName: c.fullName, setId: c.setId, setName: c.setName,
+        id: c.id, canonicalId: c.canonicalId, displayId: c.displayId,
+        variantTag: c.variantTag, variant: c.variant,
+        name: c.name, fullName: c.fullName, setId: c.setId, setName: c.setName,
         rarity: c.rarity, type: c.type, color: c.color, cost: c.cost, power: c.power,
         life: c.life, counter: c.counter, attribute: c.attribute, subTypes: c.subTypes,
         marketPrice: c.marketPrice, inventoryPrice: c.inventoryPrice,
@@ -183,17 +226,6 @@ const revalidateCatalog = async () => {
   })().finally(() => { catalogPromise = null; });
 
   return catalogPromise;
-};
-
-export const refreshCard = async (cardId) => {
-  // Fetch fresh data for one card (used when opening detail drawer)
-  try {
-    const res = await fetchJSON(`${API}/sets/card/${cardId}/`);
-    if (Array.isArray(res) && res.length > 0) {
-      return res.map(c => normalize(c, 'set'));
-    }
-  } catch {}
-  return [];
 };
 
 export const loadPriceHistory = async (cardId) => {
@@ -284,8 +316,6 @@ const readErrataSet = () => {
   } catch { return new Set(); }
 };
 
-export const getErrataIds = () => readErrataSet();
-
 export const hasPreErrata = (cardId) => readErrataSet().has(cardId);
 
 export const togglePreErrata = (cardId) => {
@@ -300,18 +330,21 @@ export const togglePreErrata = (cardId) => {
 //   - id is suffixed so React keys, entry lookups, and PriceCharting variant
 //     picks stay distinct from the base post-errata printing
 //   - variant/variantTag carry the "Pre-errata" label so the UI shows a pill
+//   - canonicalId is recomputed against the new variantTag
 export const augmentWithErrata = (catalog) => {
   const set = readErrataSet();
   if (set.size === 0) return catalog;
   const twins = [];
   for (const c of catalog) {
     if (!set.has(c.id)) continue;
-    twins.push({
+    const twin = {
       ...c,
       id: `${c.id}${ERRATA_SUFFIX}`,
       variant: 'Pre-errata',
       variantTag: 'pre-errata',
-    });
+    };
+    twin.canonicalId = canonicalIdOf(twin);
+    twins.push(twin);
   }
   return twins.length > 0 ? [...catalog, ...twins] : catalog;
 };

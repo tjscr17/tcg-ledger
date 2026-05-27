@@ -1,0 +1,227 @@
+// Vercel serverless function: TCGCSV proxy + product search.
+//
+// TCGCSV serves daily TCGPlayer dumps as JSON/CSV at https://tcgcsv.com.
+// Browser can hit it directly (no CORS issues observed), but we go through
+// this proxy for three reasons:
+//   1. server-side caching dodges the daily-snapshot 30MB-ish payload on
+//      every page load
+//   2. matches the architecture we'll need anyway once a nightly Supabase
+//      sync replaces this
+//   3. mirrors the existing /api/psa pattern
+//
+// Endpoints (dispatch by query param):
+//   ?tcgId=N    → single product price snapshot
+//   ?number=X   → list of TCGPlayer products whose extendedData.Number = X
+//                 (used by the variant resolver to show candidates per OPTCG
+//                 card identity, e.g. all printings sharing "OP11-118").
+//
+// Module-level cache (per function instance):
+//   - productIndex: Map<productId, {groupId, name, cleanName, imageUrl,
+//       number, rarity, subTypes}>. Built by crawling every group's
+//       /products endpoint once. 24h TTL.
+//   - productsByNumber: Map<displayId, productId[]>. Built alongside.
+//   - groupPricesCache: per-group prices, 6h TTL. Fetched lazily.
+
+const TCGCSV_BASE = 'https://tcgcsv.com/tcgplayer';
+const OP_TCG_CATEGORY_ID = 68;
+const INDEX_TTL_MS = 24 * 60 * 60 * 1000;
+const PRICES_TTL_MS = 6 * 60 * 60 * 1000;
+// TCGCSV requires a non-default User-Agent so the maintainer can identify
+// callers — default Node UA gets a 401 with a polite "set your UA" message.
+// See https://tcgcsv.com/docs#usage-guidelines.
+const TCGCSV_USER_AGENT = 'optcg-ledger/1.0 (collection tracker, github.com/tjscr17/optcg-ledger)';
+
+let productIndex = null;        // Map<productId, productInfo>
+let productsByNumber = null;    // Map<displayId, productId[]>
+let indexFetchedAt = 0;
+let indexPromise = null;
+const groupPricesCache = new Map();
+
+const fetchJSON = async (url) => {
+  const r = await fetch(url, { headers: { 'User-Agent': TCGCSV_USER_AGENT } });
+  if (!r.ok) throw new Error(`${url} returned ${r.status}`);
+  const body = await r.json();
+  if (body && body.success === false) {
+    throw new Error(`TCGCSV reported failure for ${url}: ${JSON.stringify(body.errors || [])}`);
+  }
+  return body;
+};
+
+// Pull a named field out of TCGCSV's extendedData array (each entry is
+// `{name, displayName, value}`). Returns "" when absent.
+const extField = (extendedData, name) => {
+  if (!Array.isArray(extendedData)) return '';
+  const hit = extendedData.find(d => d.name === name);
+  return hit?.value || '';
+};
+
+// Detect parallel / alt-art prints from product name suffixes. TCGPlayer
+// names them with parenthetical markers that follow the card name.
+const detectIsParallel = (name) => {
+  if (!name) return false;
+  const lower = name.toLowerCase();
+  return /\(alternate art\)|\(parallel\)|\(alt[- ]art\)|\(special\)|\(sp\)/i.test(lower);
+};
+
+const summarizeProduct = (p, groupId) => ({
+  groupId,
+  name: p.name || '',
+  cleanName: p.cleanName || '',
+  imageUrl: p.imageUrl || '',
+  number: extField(p.extendedData, 'Number'),
+  rarity: extField(p.extendedData, 'Rarity'),
+  isParallel: detectIsParallel(p.name),
+});
+
+const ensureIndex = async () => {
+  const fresh = productIndex && (Date.now() - indexFetchedAt < INDEX_TTL_MS);
+  if (fresh) return productIndex;
+  if (indexPromise) return indexPromise;
+  indexPromise = (async () => {
+    const groups = await fetchJSON(`${TCGCSV_BASE}/${OP_TCG_CATEGORY_ID}/groups`);
+    const byId = new Map();
+    const byNumber = new Map();
+    // Sequential — TCGCSV is one-person-run; parallel hammering is rude.
+    for (const g of groups.results || []) {
+      try {
+        const products = await fetchJSON(`${TCGCSV_BASE}/${OP_TCG_CATEGORY_ID}/${g.groupId}/products`);
+        for (const p of products.results || []) {
+          const info = summarizeProduct(p, g.groupId);
+          byId.set(p.productId, info);
+          if (info.number) {
+            const upper = info.number.toUpperCase();
+            const list = byNumber.get(upper) || [];
+            list.push(p.productId);
+            byNumber.set(upper, list);
+          }
+        }
+      } catch (e) {
+        console.warn(`[tcgcsv] failed to load products for group ${g.groupId}`, e);
+      }
+    }
+    productIndex = byId;
+    productsByNumber = byNumber;
+    indexFetchedAt = Date.now();
+    return byId;
+  })().finally(() => { indexPromise = null; });
+  return indexPromise;
+};
+
+const getGroupPrices = async (groupId) => {
+  const cached = groupPricesCache.get(groupId);
+  if (cached && Date.now() - cached.fetchedAt < PRICES_TTL_MS) return cached.prices;
+  const data = await fetchJSON(`${TCGCSV_BASE}/${OP_TCG_CATEGORY_ID}/${groupId}/prices`);
+  const prices = data.results || [];
+  groupPricesCache.set(groupId, { prices, fetchedAt: Date.now() });
+  return prices;
+};
+
+const pickPriceRecord = (records, productId) => {
+  const forProduct = records.filter(r => r.productId === productId);
+  if (forProduct.length === 0) return null;
+  const normal = forProduct.find(r => r.subTypeName === 'Normal');
+  return normal || forProduct.find(r => r.marketPrice != null) || forProduct[0];
+};
+
+const priceSnapshotFor = async (tcgId) => {
+  const info = productIndex.get(tcgId);
+  if (!info) return null;
+  const prices = await getGroupPrices(info.groupId);
+  const record = pickPriceRecord(prices, tcgId);
+  return record;
+};
+
+// Build the per-product summary returned to clients (search response).
+// Includes the most recent cached price snapshot for quick UI display.
+const productPayload = async (tcgId, info) => {
+  const record = await priceSnapshotFor(tcgId);
+  return {
+    tcg_id: tcgId,
+    group_id: info.groupId,
+    name: info.name,
+    clean_name: info.cleanName,
+    image_url: info.imageUrl,
+    number: info.number,
+    rarity: info.rarity,
+    is_parallel: info.isParallel,
+    market_price: record?.marketPrice ?? null,
+    low_price: record?.lowPrice ?? null,
+    mid_price: record?.midPrice ?? null,
+    high_price: record?.highPrice ?? null,
+    sub_type_name: record?.subTypeName ?? null,
+  };
+};
+
+export default async function handler(req, res) {
+  const tcgIdRaw = req.query?.tcgId;
+  const numberRaw = req.query?.number;
+
+  // Dispatch on the params present.
+  if (tcgIdRaw) {
+    const tcgId = Number(tcgIdRaw);
+    if (!Number.isFinite(tcgId) || tcgId <= 0) {
+      res.status(400).json({ error: 'tcgId must be a positive integer' });
+      return;
+    }
+    try {
+      await ensureIndex();
+      const info = productIndex.get(tcgId);
+      if (!info) {
+        res.status(404).json({ error: `productId ${tcgId} is not in the One Piece TCG catalog` });
+        return;
+      }
+      const record = await priceSnapshotFor(tcgId);
+      if (!record) {
+        res.status(404).json({ error: `no price record for productId ${tcgId}` });
+        return;
+      }
+      res.setHeader('Cache-Control', 's-maxage=3600, stale-while-revalidate=86400');
+      res.status(200).json({
+        tcg_id: tcgId,
+        group_id: info.groupId,
+        market_price: record.marketPrice,
+        low_price: record.lowPrice,
+        mid_price: record.midPrice,
+        high_price: record.highPrice,
+        direct_low_price: record.directLowPrice,
+        sub_type_name: record.subTypeName,
+        fetched_at: new Date().toISOString(),
+      });
+    } catch (e) {
+      res.status(502).json({ error: `TCGCSV upstream failure: ${e.message || e}` });
+    }
+    return;
+  }
+
+  if (numberRaw) {
+    const number = String(numberRaw).trim().toUpperCase();
+    if (!number) {
+      res.status(400).json({ error: 'number must be non-empty' });
+      return;
+    }
+    try {
+      await ensureIndex();
+      const ids = productsByNumber.get(number) || [];
+      const products = await Promise.all(ids.map(async (id) => {
+        const info = productIndex.get(id);
+        if (!info) return null;
+        return productPayload(id, info);
+      }));
+      const filtered = products.filter(Boolean);
+      // Non-parallel first, then parallel (UX preference; the matcher tends
+      // to want "base print" at the top of the candidate list).
+      filtered.sort((a, b) => (a.is_parallel ? 1 : 0) - (b.is_parallel ? 1 : 0));
+      res.setHeader('Cache-Control', 's-maxage=3600, stale-while-revalidate=86400');
+      res.status(200).json({
+        number,
+        products: filtered,
+        fetched_at: new Date().toISOString(),
+      });
+    } catch (e) {
+      res.status(502).json({ error: `TCGCSV upstream failure: ${e.message || e}` });
+    }
+    return;
+  }
+
+  res.status(400).json({ error: 'one of ?tcgId=N or ?number=X is required' });
+}

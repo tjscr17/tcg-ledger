@@ -435,7 +435,6 @@ body { background: var(--paper); }
 .op-card-tile-body { padding: 7px 9px 9px; flex: 1; display: flex; flex-direction: column; }
 .op-card-tile-id { font-family: var(--mono); font-size: 9px; font-weight: 600; color: var(--ink-soft); margin-bottom: 2px; }
 .op-card-tile-name { font-family: var(--display); font-weight: 600; font-size: 13px; line-height: 1.15; margin-bottom: 2px; }
-.op-card-tile-set { font-size: 9px; color: var(--ink-soft); font-style: italic; margin-bottom: 6px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .op-card-tile-price { display: flex; align-items: baseline; gap: 5px; margin-top: auto; padding-top: 6px; }
 .op-card-tile-price-tier { margin-top: 2px; padding-top: 0; border-top: 1px dashed var(--line); padding-top: 4px; }
 .op-card-tile-price-tier .op-card-tile-price-val { color: var(--gold); }
