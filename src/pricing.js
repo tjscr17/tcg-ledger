@@ -132,8 +132,10 @@ export const fetchPriceSnapshot = async (tcgId, { force = false } = {}) => {
   const promise = (async () => {
     try {
       const r = await fetch(`/api/tcgcsv?tcgId=${encodeURIComponent(key)}`);
+      // The proxy now returns 200 + `{ not_found: true }` for unknown
+      // productIds (used to be a 404 — kept the browser console noisy on
+      // stale resolutions). Legacy 404 handling stays for older deploys.
       if (r.status === 404) {
-        // Negative-cache so we don't hammer the proxy for unknown products.
         const cache = readCache();
         cache[key] = { tcg_id: Number(key), market_price: null, cached_at: Date.now(), not_found: true };
         writeCache(cache);

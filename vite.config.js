@@ -183,14 +183,25 @@ export default defineConfig(({ mode }) => {
                 await ensureIndex();
                 const info = productIndex.get(tcgId);
                 if (!info) {
-                  res.statusCode = 404;
-                  res.end(JSON.stringify({ error: `productId ${tcgId} is not in the One Piece TCG catalog` }));
+                  res.statusCode = 200;
+                  res.end(JSON.stringify({
+                    tcg_id: tcgId,
+                    not_found: true,
+                    reason: `productId ${tcgId} is not in the One Piece TCG catalog (likely a stale resolution)`,
+                    fetched_at: new Date().toISOString(),
+                  }));
                   return;
                 }
                 const record = await priceSnapshotFor(tcgId);
                 if (!record) {
-                  res.statusCode = 404;
-                  res.end(JSON.stringify({ error: `no price record for productId ${tcgId}` }));
+                  res.statusCode = 200;
+                  res.end(JSON.stringify({
+                    tcg_id: tcgId,
+                    group_id: info.groupId,
+                    not_found: true,
+                    reason: `no price record for productId ${tcgId}`,
+                    fetched_at: new Date().toISOString(),
+                  }));
                   return;
                 }
                 res.statusCode = 200;

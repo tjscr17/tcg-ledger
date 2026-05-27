@@ -167,12 +167,30 @@ export default async function handler(req, res) {
       await ensureIndex();
       const info = productIndex.get(tcgId);
       if (!info) {
-        res.status(404).json({ error: `productId ${tcgId} is not in the One Piece TCG catalog` });
+        // 200 with `not_found: true` keeps the browser console quiet — the
+        // client treats this identically to a 404 (negative-cache for 6h),
+        // but a 404 here usually means a stale resolution from the old
+        // PriceCharting bridge (TCGPlayer retired/merged the product). It's
+        // not really an error from the proxy's perspective.
+        res.setHeader('Cache-Control', 's-maxage=3600, stale-while-revalidate=86400');
+        res.status(200).json({
+          tcg_id: tcgId,
+          not_found: true,
+          reason: `productId ${tcgId} is not in the One Piece TCG catalog (may be a stale resolution — re-resolve via the Resolve view)`,
+          fetched_at: new Date().toISOString(),
+        });
         return;
       }
       const record = await priceSnapshotFor(tcgId);
       if (!record) {
-        res.status(404).json({ error: `no price record for productId ${tcgId}` });
+        res.setHeader('Cache-Control', 's-maxage=3600, stale-while-revalidate=86400');
+        res.status(200).json({
+          tcg_id: tcgId,
+          group_id: info.groupId,
+          not_found: true,
+          reason: `no price record for productId ${tcgId} (product exists but TCGCSV has no recent prices)`,
+          fetched_at: new Date().toISOString(),
+        });
         return;
       }
       res.setHeader('Cache-Control', 's-maxage=3600, stale-while-revalidate=86400');

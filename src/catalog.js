@@ -270,16 +270,21 @@ export const loadPriceHistory = async (cardId) => {
         if (Array.isArray(res) && res.length > 0) { data = res; break; }
       } catch {}
     }
-    if (!data) return [];
 
     const points = data
-      .map(d => ({
-        date: d.date_scraped || d.date || d.scrape_date,
-        price: Number(d.market_price ?? d.inventory_price) || 0,
-      }))
-      .filter(p => p.date && p.price > 0)
-      .sort((a, b) => a.date.localeCompare(b.date));
+      ? data
+          .map(d => ({
+            date: d.date_scraped || d.date || d.scrape_date,
+            price: Number(d.market_price ?? d.inventory_price) || 0,
+          }))
+          .filter(p => p.date && p.price > 0)
+          .sort((a, b) => a.date.localeCompare(b.date))
+      : [];
 
+    // Cache even the empty result. OPTCGAPI returns 500 (no CORS headers, so
+    // the browser logs it as a CORS error) for cards it has no history for —
+    // we'd rather hit that path once per cache window than every time the
+    // user opens the same card's detail drawer.
     try {
       localStorage.setItem(cacheKey, JSON.stringify({ ts: Date.now(), data: points }));
     } catch {}
