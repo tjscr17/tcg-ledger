@@ -228,9 +228,29 @@ const revalidateCatalog = async () => {
   return catalogPromise;
 };
 
+// OPTCGAPI's twoweeks endpoints only recognize the bare card_set_id (e.g.
+// "EB02-061") — passing a parallel/variant suffix ("EB02-061_p2",
+// "OP01-016__pre-errata", or any canonical "-pN" / "-pre-errata" form) gets
+// a 500 with no CORS headers, which surfaces in the browser as a scary CORS
+// error even though we catch the network failure. Normalize before the
+// request to dodge the noise entirely.
+const stripVariantForApi = (cardId) => {
+  if (!cardId) return cardId;
+  // 1) Drop everything from a "__" promo/errata tag onward (OPTCG style).
+  let id = String(cardId).split('__')[0];
+  // 2) Drop the "_p\d+" parallel suffix (OPTCG style).
+  id = id.replace(/_p\d+$/i, '');
+  // 3) Drop canonical-form variant tag ("-p1", "-pre-errata", "-tournament-winner")
+  //    by keeping only the leading `<setCode>-<cardNumber>`.
+  const canonical = id.match(/^[A-Z]+\d+-\d+/i);
+  return canonical ? canonical[0] : id;
+};
+
 export const loadPriceHistory = async (cardId) => {
+  const queryId = stripVariantForApi(cardId);
+  const cacheKey = HISTORY_PREFIX + queryId;
   try {
-    const cached = localStorage.getItem(HISTORY_PREFIX + cardId);
+    const cached = localStorage.getItem(cacheKey);
     if (cached) {
       const { ts, data } = JSON.parse(cached);
       if (Date.now() - ts < HISTORY_TTL_MS) return data;
@@ -241,9 +261,9 @@ export const loadPriceHistory = async (cardId) => {
     // Try set, then starter, then promo endpoints
     let data = null;
     for (const path of [
-      `${API}/sets/card/twoweeks/${cardId}/`,
-      `${API}/decks/card/twoweeks/${cardId}/`,
-      `${API}/promos/card/twoweeks/${cardId}/`,
+      `${API}/sets/card/twoweeks/${queryId}/`,
+      `${API}/decks/card/twoweeks/${queryId}/`,
+      `${API}/promos/card/twoweeks/${queryId}/`,
     ]) {
       try {
         const res = await fetchJSON(path);
@@ -261,7 +281,7 @@ export const loadPriceHistory = async (cardId) => {
       .sort((a, b) => a.date.localeCompare(b.date));
 
     try {
-      localStorage.setItem(HISTORY_PREFIX + cardId, JSON.stringify({ ts: Date.now(), data: points }));
+      localStorage.setItem(cacheKey, JSON.stringify({ ts: Date.now(), data: points }));
     } catch {}
 
     return points;

@@ -4,15 +4,17 @@ import { store, MODE, VAULT_LABEL } from './storage.js';
 import { loadCatalog, loadPriceHistory, groupBySet, compareSets, augmentWithErrata, hasPreErrata, togglePreErrata } from './catalog.js';
 import {
   GRADING_COMPANIES, GRADES_BY_COMPANY,
-  fetchGradedPrice, isAggregateAcrossCompanies, hasToken,
-  searchVariants, getSavedPick, savePick, priceFromProduct,
+  hasToken,
   getCachedImage, resolveEnhancedImage,
-  PRICE_TIERS, getCachedTierPrice, getCachedLoosePrice, isVariantSnapshotFresh, resolveVariantSnapshot,
+  getCachedLoosePrice, isVariantSnapshotFresh, resolveVariantSnapshot,
   onVariantResolved, hydrateFromShared, subscribeResolutions,
 } from './grading.js';
 import { hasPsaToken, fetchCert, findCandidateCards } from './psa.js';
 import { runCanonicalMigration } from './migrate.js';
-import { getMarketPriceForCard, ensurePriceForCard, onPriceResolved } from './pricing.js';
+import {
+  getMarketPriceForCard, ensurePriceForCard, onPriceResolved,
+  searchTcgProducts, saveResolution, getResolution, cardNumberFromCanonical,
+} from './pricing.js';
 
 // Like useState, but persists to localStorage. `serialize`/`deserialize` are
 // optional escape hatches for non-JSON-friendly values (e.g. Sets).
@@ -1428,7 +1430,8 @@ function SearchView({ catalog, watchlist = [], variantRev = 0, onAddCard, onCard
   const [filterDim, setFilterDim] = useStoredState('optcg:search:filterDim', 'none'); // 'none' | 'rarity' | 'color'
   const [filterValue, setFilterValue] = useStoredState('optcg:search:filterValue', 'all');
   const [sortBy, setSortBy] = useStoredState('optcg:search:sortBy', 'set'); // 'set' | 'name' | 'price-desc' | 'price-asc'
-  const [priceTier, setPriceTier] = useStoredState('optcg:search:priceTier', 'raw');
+  // Stage 4 removed the "Price as" tier toggle (raw only). Stage 5 will
+  // garbage-collect the persisted localStorage value.
   // Hide filter: per-dimension Sets so multiple hides apply at once. `hideDim`
   // controls which dimension's pills are visible — the other dimensions stay
   // active in the background.
@@ -1599,10 +1602,6 @@ function SearchView({ catalog, watchlist = [], variantRev = 0, onAddCard, onCard
           />
         )}
 
-        <FilterGroup label="Price as" value={priceTier} onChange={setPriceTier} mode="select" options={
-          PRICE_TIERS.map(t => ({ v: t.value, l: t.label }))
-        } />
-
         <FilterGroup label="Sort" value={sortBy} onChange={setSortBy} options={[
           { v: 'set', l: 'By Set' },
           { v: 'name', l: 'Name' },
@@ -1660,7 +1659,6 @@ function SearchView({ catalog, watchlist = [], variantRev = 0, onAddCard, onCard
               onCardClick={onCardClick}
               onToggleWatch={onToggleWatch}
               watchedIds={watchedIds}
-              priceTier={priceTier}
             />
           ))}
         </div>
@@ -1674,7 +1672,6 @@ function SearchView({ catalog, watchlist = [], variantRev = 0, onAddCard, onCard
               onCardClick={onCardClick}
               onToggleWatch={onToggleWatch}
               isWatched={watchedIds.has(card.canonicalId || card.id)}
-              priceTier={priceTier}
             />
           ))}
         </div>
@@ -2867,40 +2864,55 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
   const [prefetchTotal, setPrefetchTotal] = useState(0);
   const [prefetchFailed, setPrefetchFailed] = useState(0);
   const abortRef = useRef(false);
+  // Bump on a resolution save so the "unresolved" queue + currentCard state
+  // re-derive after the user picks something.
+  const [resolveRev, setResolveRev] = useState(0);
+
+  const cidOf = (c) => c.canonicalId || c.id;
+  const isResolved = (c) => Boolean(getResolution(cidOf(c)));
 
   const queue = useMemo(() => {
     if (filterMode === 'in-collection') {
       // entries.card_id is canonical post-migration; match against canonicalId.
       const ids = new Set(entries.map(e => e.card_id));
-      return catalog.filter(c => ids.has(c.canonicalId || c.id));
+      return catalog.filter(c => ids.has(cidOf(c)));
     }
     if (filterMode === 'unresolved') {
-      return catalog.filter(c => !isVariantSnapshotFresh(c.canonicalId || c.id));
+      return catalog.filter(c => !isResolved(c));
     }
     return catalog;
-  }, [catalog, entries, filterMode]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [catalog, entries, filterMode, resolveRev]);
 
   const runPrefetch = async () => {
     if (prefetching) return;
-    if (!hasToken()) { alert('PriceCharting token missing — set VITE_PRICECHARTING_TOKEN.'); return; }
-    const targets = catalog.filter(c => !isVariantSnapshotFresh(c.canonicalId || c.id));
+    const targets = catalog.filter(c => !isResolved(c));
     if (targets.length === 0) { alert('Everything is already resolved.'); return; }
-    if (!confirm(`Prefetch ${targets.length.toLocaleString()} unresolved card${targets.length === 1 ? '' : 's'} from PriceCharting? This may take several minutes.`)) return;
+    if (!confirm(`Auto-resolve ${targets.length.toLocaleString()} unresolved card${targets.length === 1 ? '' : 's'} via TCGCSV? Picks the non-parallel base when one exists, otherwise the first match. You can override any choice manually afterwards.`)) return;
     abortRef.current = false;
     setPrefetching(true);
     setPrefetchTotal(targets.length);
     setPrefetchDone(0);
     setPrefetchFailed(0);
 
-    const concurrency = 3;
+    // Concurrency-2 — TCGCSV's maintainer asks for polite traffic; cards
+    // share a group's price endpoint so duplicates of the same group
+    // benefit from the proxy's per-group cache.
+    const concurrency = 2;
     let idx = 0;
     const worker = async () => {
       while (idx < targets.length) {
         if (abortRef.current) return;
         const card = targets[idx++];
         try {
-          const ok = await resolveVariantSnapshot(card);
-          if (!ok) setPrefetchFailed(f => f + 1);
+          const number = cardNumberFromCanonical(cidOf(card)) || card.displayId;
+          const products = await searchTcgProducts(number);
+          const baseFirst = [...products].sort(
+            (a, b) => (a.is_parallel ? 1 : 0) - (b.is_parallel ? 1 : 0)
+          );
+          const pick = baseFirst[0];
+          if (pick) saveResolution(cidOf(card), pick);
+          else setPrefetchFailed(f => f + 1);
         } catch {
           setPrefetchFailed(f => f + 1);
         }
@@ -2909,12 +2921,14 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
     };
     await Promise.all(Array.from({ length: concurrency }, worker));
     setPrefetching(false);
+    setResolveRev(r => r + 1);
   };
   const cancelPrefetch = () => { abortRef.current = true; };
 
   const currentCard = queue[index];
+  const currentCid = currentCard ? cidOf(currentCard) : '';
 
-  const [variants, setVariants] = useState([]);
+  const [candidates, setCandidates] = useState([]);
   const [selectedPickId, setSelectedPickId] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -2924,35 +2938,41 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
   }, [filterMode]);
 
   useEffect(() => {
-    setVariants([]);
+    setCandidates([]);
     setSelectedPickId('');
     setError('');
     if (!currentCard) return;
-    if (!hasToken()) { setError('PriceCharting token missing — set VITE_PRICECHARTING_TOKEN in .env.local.'); return; }
+    const number = cardNumberFromCanonical(currentCid) || currentCard.displayId;
+    if (!number) { setError(`Couldn't extract a card number from ${currentCid || currentCard.id}.`); return; }
     let cancelled = false;
     setLoading(true);
-    searchVariants(currentCard).then(matches => {
+    searchTcgProducts(number).then(matches => {
       if (cancelled) return;
-      setVariants(matches);
+      setCandidates(matches);
       if (matches.length === 0) {
-        setError(`No PriceCharting match for ${currentCard.displayId || currentCard.id}.`);
+        setError(`No TCGPlayer match for ${number}.`);
       } else {
-        const saved = getSavedPick(currentCard.canonicalId || currentCard.id);
-        const chosen = (saved && matches.find(v => String(v.id) === saved.id)) || matches[0];
-        setSelectedPickId(String(chosen.id));
+        const saved = getResolution(currentCid);
+        const chosen = (saved && matches.find(v => v.tcg_id === saved.tcg_id))
+          || matches.find(v => !v.is_parallel)
+          || matches[0];
+        setSelectedPickId(String(chosen.tcg_id));
       }
     }).catch(e => {
-      if (!cancelled) setError(e.message || 'Failed to load PriceCharting matches.');
+      if (!cancelled) setError(e.message || 'Failed to load TCGCSV matches.');
     }).finally(() => {
       if (!cancelled) setLoading(false);
     });
     return () => { cancelled = true; };
-  }, [currentCard]);
+  }, [currentCard, currentCid]);
 
-  const selected = variants.find(v => String(v.id) === selectedPickId);
+  const selected = candidates.find(v => String(v.tcg_id) === selectedPickId);
 
   const handleSave = () => {
-    if (selected && currentCard) savePick(currentCard.canonicalId || currentCard.id, selected);
+    if (selected && currentCard) {
+      saveResolution(currentCid, selected);
+      setResolveRev(r => r + 1);
+    }
     setIndex(i => i + 1);
   };
   const handleSkip = () => setIndex(i => i + 1);
@@ -2964,7 +2984,7 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
         <div>
           <div className="op-eyebrow">Catalog cleanup</div>
           <h1 className="op-page-title">Resolve cards</h1>
-          <div className="op-page-sub">Pick the correct PriceCharting variant for each card. Saves auto-populate graded prices and TCGPlayer art.</div>
+          <div className="op-page-sub">Pick the correct TCGPlayer printing for each card. Saves wire up the raw market price (TCGCSV) and TCGPlayer art.</div>
         </div>
       </div>
 
@@ -2978,8 +2998,8 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
         <div className="op-filter-group">
           <div className="op-filter-label">Bulk</div>
           {!prefetching ? (
-            <button className="op-btn-ghost" onClick={runPrefetch} title="Resolve every unresolved card from PriceCharting in the background">
-              <RefreshCw size={14} /> Prefetch all unresolved
+            <button className="op-btn-ghost" onClick={runPrefetch} title="Auto-resolve every unresolved card via TCGCSV (picks the base printing)">
+              <RefreshCw size={14} /> Auto-resolve all
             </button>
           ) : (
             <button className="op-btn-ghost" onClick={cancelPrefetch}>
@@ -3005,7 +3025,7 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
       )}
       {!prefetching && prefetchTotal > 0 && prefetchDone > 0 && prefetchDone >= prefetchTotal && (
         <div className="op-prefetch-done">
-          Prefetch complete · {(prefetchTotal - prefetchFailed).toLocaleString()} resolved, {prefetchFailed.toLocaleString()} unmatched.
+          Auto-resolve complete · {(prefetchTotal - prefetchFailed).toLocaleString()} resolved, {prefetchFailed.toLocaleString()} unmatched.
         </div>
       )}
 
@@ -3014,7 +3034,7 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
           <Package size={36} strokeWidth={1.2} />
           <div className="op-empty-title">Nothing to resolve here</div>
           <div className="op-empty-sub">
-            {filterMode === 'unresolved' ? 'Every card has a cached PriceCharting variant.' :
+            {filterMode === 'unresolved' ? 'Every card has a TCGPlayer printing picked.' :
              filterMode === 'in-collection' ? 'No cards in your collections yet.' :
              'Catalog is empty.'}
           </div>
@@ -3046,36 +3066,48 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
                 {RARITY_LABELS[currentCard.rarity] || currentCard.rarity} · Raw: ${effectiveRawPrice(currentCard).toFixed(2)}
               </div>
 
-              <Field label="PriceCharting variant">
+              <Field label="TCGPlayer printing">
                 <div className="op-variant-row">
                   <select
                     value={selectedPickId}
                     onChange={(e) => setSelectedPickId(e.target.value)}
-                    disabled={loading || variants.length === 0}
+                    disabled={loading || candidates.length === 0}
                   >
                     {loading && <option>Loading matches…</option>}
-                    {!loading && variants.length === 0 && <option value="">No matches</option>}
-                    {variants.map(v => (
-                      <option key={v.id} value={String(v.id)}>
-                        {v['product-name']} — {v['console-name']}
-                      </option>
-                    ))}
+                    {!loading && candidates.length === 0 && <option value="">No matches</option>}
+                    {candidates.map(v => {
+                      const price = v.market_price != null ? `$${Number(v.market_price).toFixed(2)}` : 'no price';
+                      return (
+                        <option key={v.tcg_id} value={String(v.tcg_id)}>
+                          {v.name}{v.is_parallel ? ' [parallel]' : ''} · {price}
+                        </option>
+                      );
+                    })}
                   </select>
                 </div>
               </Field>
 
               {selected && (
                 <div className="op-resolve-prices">
-                  {PRICE_TIERS.filter(t => t.value !== 'raw').map(t => {
-                    const cents = Number(selected[t.field]) || 0;
-                    const dollars = cents > 0 ? cents / 100 : null;
-                    return (
-                      <div key={t.value} className="op-resolve-price-row">
-                        <span className="op-resolve-price-label">{t.label}</span>
-                        <span className="op-resolve-price-val">{dollars != null ? `$${dollars.toFixed(2)}` : '—'}</span>
-                      </div>
-                    );
-                  })}
+                  <div className="op-resolve-price-row">
+                    <span className="op-resolve-price-label">Market</span>
+                    <span className="op-resolve-price-val">
+                      {selected.market_price != null ? `$${Number(selected.market_price).toFixed(2)}` : '—'}
+                    </span>
+                  </div>
+                  <div className="op-resolve-price-row">
+                    <span className="op-resolve-price-label">Low / Mid / High</span>
+                    <span className="op-resolve-price-val">
+                      {[selected.low_price, selected.mid_price, selected.high_price]
+                        .map(p => p != null ? `$${Number(p).toFixed(2)}` : '—').join(' / ')}
+                    </span>
+                  </div>
+                  <div className="op-resolve-price-row">
+                    <span className="op-resolve-price-label">Rarity · type</span>
+                    <span className="op-resolve-price-val">
+                      {(selected.rarity || '—')} · {selected.sub_type_name || '—'}
+                    </span>
+                  </div>
                 </div>
               )}
 
@@ -3097,7 +3129,7 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
   );
 }
 
-function SetGroup({ group, onAddCard, onCardClick, onToggleWatch, watchedIds = new Set(), priceTier }) {
+function SetGroup({ group, onAddCard, onCardClick, onToggleWatch, watchedIds = new Set() }) {
   const [collapsed, setCollapsed] = useState(false);
   return (
     <div className="op-set-group">
@@ -3117,7 +3149,6 @@ function SetGroup({ group, onAddCard, onCardClick, onToggleWatch, watchedIds = n
               onCardClick={onCardClick}
               onToggleWatch={onToggleWatch}
               isWatched={watchedIds.has(card.canonicalId || card.id)}
-              priceTier={priceTier}
             />
           ))}
         </div>
@@ -3126,22 +3157,12 @@ function SetGroup({ group, onAddCard, onCardClick, onToggleWatch, watchedIds = n
   );
 }
 
-function CardTile({ card, onAddCard, onCardClick, onToggleWatch = () => {}, isWatched = false, priceTier = 'raw' }) {
-  const showTier = priceTier && priceTier !== 'raw';
-  const tierMeta = PRICE_TIERS.find(t => t.value === priceTier);
-  const cid = card.canonicalId || card.id;
-  // Force re-read of the variant cache when this card's snapshot lands.
-  const [, bumpTick] = useReducer(x => x + 1, 0);
-  useEffect(() => {
-    if (!showTier) return;
-    return onVariantResolved((id) => { if (id === cid) bumpTick(); });
-  }, [cid, showTier]);
-  const tierPrice = showTier ? getCachedTierPrice(cid, priceTier) : null;
+function CardTile({ card, onAddCard, onCardClick, onToggleWatch = () => {}, isWatched = false }) {
   return (
     <div className="op-card-tile">
       <button className="op-card-tile-main" onClick={() => onCardClick(card)}>
         <div className="op-card-tile-art">
-          <CardArt card={card} needsVariant={showTier} />
+          <CardArt card={card} />
           <div className="op-card-tile-rarity">{card.rarity}</div>
           {card.isParallel && <div className="op-card-tile-parallel">PARALLEL</div>}
         </div>
@@ -3155,14 +3176,6 @@ function CardTile({ card, onAddCard, onCardClick, onToggleWatch = () => {}, isWa
             <span className="op-card-tile-price-label">Raw</span>
             <span className="op-card-tile-price-val">${effectiveRawPrice(card).toFixed(2)}</span>
           </div>
-          {showTier && (
-            <div className="op-card-tile-price op-card-tile-price-tier">
-              <span className="op-card-tile-price-label">{tierMeta?.label || priceTier}</span>
-              <span className="op-card-tile-price-val">
-                {tierPrice != null ? `$${tierPrice.toFixed(2)}` : '—'}
-              </span>
-            </div>
-          )}
         </div>
       </button>
       <div className="op-card-tile-actions">
@@ -3261,15 +3274,6 @@ function AddCardModal({ card, entry, collections, activeCollectionId, onClose, o
   const [bgsBlack, setBgsBlack] = useState(Boolean(entry?.bgs_black));
   const [certNumber, setCertNumber] = useState(entry?.cert_number || '');
   const [gradedPrice, setGradedPrice] = useState(entry?.graded_price ? String(entry.graded_price) : '');
-  const [pcProductId, setPcProductId] = useState(entry?.pc_product_id || '');
-  const [pcProductName, setPcProductName] = useState(entry?.pc_product_name || '');
-  const [priceFetchedAt, setPriceFetchedAt] = useState(entry?.price_fetched_at || '');
-  const [fetchingPrice, setFetchingPrice] = useState(false);
-  const [priceFetchError, setPriceFetchError] = useState('');
-
-  const [variants, setVariants] = useState([]);
-  const [variantsLoading, setVariantsLoading] = useState(false);
-  const [variantsError, setVariantsError] = useState('');
 
   const addContribRow = () => setContributions([...contributions, { name: '', amount: '' }]);
   const updateContrib = (i, patch) => setContributions(contributions.map((c, idx) => idx === i ? { ...c, ...patch } : c));
@@ -3279,79 +3283,9 @@ function AddCardModal({ card, entry, collections, activeCollectionId, onClose, o
   const priceNum = Number(purchasePrice) || 0;
   const contribMismatch = contributions.length > 0 && Math.abs(contribTotal - priceNum) > 0.01;
 
-  const loadVariants = useCallback(async () => {
-    setVariantsError('');
-    if (!hasToken()) {
-      setVariantsError('PriceCharting token missing — set VITE_PRICECHARTING_TOKEN in .env.local and restart the dev server.');
-      return;
-    }
-    setVariantsLoading(true);
-    try {
-      const list = await searchVariants(card);
-      setVariants(list);
-      if (list.length === 0) {
-        setVariantsError(`No PriceCharting match found for ${card.id}.`);
-        setPcProductId('');
-        setPcProductName('');
-        return;
-      }
-      const saved = getSavedPick(card.canonicalId || card.id);
-      const chosen = (saved && list.find(v => String(v.id) === saved.id)) || list[0];
-      setPcProductId(String(chosen.id));
-      setPcProductName(chosen['product-name']);
-    } catch (e) {
-      setVariantsError(e.message || 'Failed to load PriceCharting variants.');
-    } finally {
-      setVariantsLoading(false);
-    }
-  }, [card]);
-
-  const refreshGradedPrice = useCallback(async () => {
-    setPriceFetchError('');
-    if (!pcProductId) return;
-    setFetchingPrice(true);
-    try {
-      const result = await fetchGradedPrice({ productId: pcProductId, productName: pcProductName, gradingCompany, grade });
-      if (!result) {
-        setPriceFetchError('Could not fetch price.');
-      } else if (result.missing) {
-        setPriceFetchError(`PriceCharting has no recorded ${gradingCompany} ${grade} sales for this variant.`);
-        setGradedPrice('0.00');
-        setPriceFetchedAt(result.fetched_at);
-      } else {
-        setGradedPrice(result.price.toFixed(2));
-        setPriceFetchedAt(result.fetched_at);
-      }
-    } catch (e) {
-      setPriceFetchError(e.message || 'Failed to fetch graded price.');
-    } finally {
-      setFetchingPrice(false);
-    }
-  }, [pcProductId, pcProductName, gradingCompany, grade]);
-
-  // Load the variant list when grading is toggled on
-  useEffect(() => {
-    if (!isGraded) return;
-    if (variants.length === 0 && !variantsLoading && !variantsError) {
-      loadVariants();
-    }
-  }, [isGraded, variants.length, variantsLoading, variantsError, loadVariants]);
-
-  // Refetch price whenever the chosen variant or grade changes.
-  // BGS Black Label has no PriceCharting API field — skip auto-fetch in that
-  // mode so we don't silently populate with the regular BGS 10 price.
-  useEffect(() => {
-    if (!isGraded || !pcProductId) return;
-    if (bgsBlack) return;
-    refreshGradedPrice();
-  }, [isGraded, pcProductId, gradingCompany, grade, bgsBlack, refreshGradedPrice]);
-
-  const selectedVariant = variants.find(v => String(v.id) === pcProductId);
-
   const handleSave = async () => {
     setSaving(true);
     const cid = card.canonicalId || card.id;
-    if (isGraded && selectedVariant) savePick(cid, selectedVariant);
     const payload = {
       card_id: cid,
       collection_id: collectionId,
@@ -3365,10 +3299,12 @@ function AddCardModal({ card, entry, collections, activeCollectionId, onClose, o
       bgs_black: Boolean(isGraded && gradingCompany === 'BGS' && Number(grade) === 10 && bgsBlack),
       cert_number: isGraded ? certNumber.trim() : '',
       graded_price: isGraded ? (Number(gradedPrice) || 0) : 0,
-      pc_product_id: isGraded ? pcProductId : '',
-      pc_product_name: isGraded ? pcProductName : '',
-      price_source: isGraded && pcProductId ? 'pricecharting' : '',
-      price_fetched_at: isGraded && priceFetchedAt ? priceFetchedAt : null,
+      // PriceCharting-specific columns retained on the entry (pc_product_id,
+      // pc_product_name, price_source, price_fetched_at) are no longer
+      // written from this modal — Stage 4 parks the auto-refresh flow.
+      // Existing values on `entry` are preserved untouched by leaving them
+      // out of the patch (shared Supabase keeps the prior value; solo
+      // localStorage merges patch into the existing row).
     };
     if (editing) payload.id = entry.id;
     await onSave(payload);
@@ -3392,10 +3328,6 @@ function AddCardModal({ card, entry, collections, activeCollectionId, onClose, o
             <div className="op-modal-sub">{card.displayId || card.id} · {card.setName} · {RARITY_LABELS[card.rarity] || card.rarity}</div>
             <div className="op-modal-market">
               Raw: <strong>${effectiveRawPrice(card).toFixed(2)}</strong>
-              {(() => {
-                const p = getCachedTierPrice(card.canonicalId || card.id, 'psa10');
-                return p != null ? <> · PSA 10: <strong>${p.toFixed(2)}</strong></> : null;
-              })()}
             </div>
           </div>
         </div>
@@ -3475,7 +3407,7 @@ function AddCardModal({ card, entry, collections, activeCollectionId, onClose, o
                   <Award size={14} style={{ verticalAlign: 'middle', marginRight: 6 }} />
                   Grading
                 </div>
-                <div className="op-form-section-sub">Track PSA, BGS, CGC, or SGC grade and pull live graded market price.</div>
+                <div className="op-form-section-sub">Record PSA / BGS / CGC / SGC grade and cert number. Enter the graded price manually.</div>
               </div>
             </div>
 
@@ -3500,78 +3432,21 @@ function AddCardModal({ card, entry, collections, activeCollectionId, onClose, o
                 {gradingCompany === 'BGS' && Number(grade) === 10 && (
                   <label className="op-graded-toggle" style={{ marginBottom: 8 }}>
                     <input type="checkbox" checked={bgsBlack} onChange={(e) => setBgsBlack(e.target.checked)} />
-                    <span>Black Label (Perfect 10 · all four subgrades = 10) — manual price only</span>
+                    <span>Black Label (Perfect 10 · all four subgrades = 10)</span>
                   </label>
                 )}
 
-                <Field label="PriceCharting variant">
-                  <div className="op-variant-row">
-                    <select
-                      value={pcProductId}
-                      onChange={(e) => {
-                        const v = variants.find(x => String(x.id) === e.target.value);
-                        setPcProductId(e.target.value);
-                        setPcProductName(v ? v['product-name'] : '');
-                      }}
-                      disabled={variantsLoading || variants.length === 0}
-                    >
-                      {variantsLoading && <option>Loading variants…</option>}
-                      {!variantsLoading && variants.length === 0 && <option value="">No matches</option>}
-                      {variants.map(v => {
-                        const q = priceFromProduct(v, gradingCompany, grade);
-                        const tag = q.price > 0 ? `${gradingCompany} ${grade}: $${q.price.toFixed(2)}` : 'no price';
-                        return (
-                          <option key={v.id} value={String(v.id)}>
-                            {v['product-name']} — {v['console-name']} · {tag}
-                          </option>
-                        );
-                      })}
-                    </select>
-                    <button
-                      type="button"
-                      className="op-btn-ghost"
-                      onClick={loadVariants}
-                      disabled={variantsLoading}
-                      title="Re-run PriceCharting search"
-                    >
-                      {variantsLoading ? <Loader2 size={14} className="op-spin" /> : <RefreshCw size={14} />}
-                    </button>
-                  </div>
+                <Field label="Graded market price (USD)">
+                  <input
+                    type="number" step="0.01" placeholder="0.00"
+                    value={gradedPrice} onChange={(e) => setGradedPrice(e.target.value)}
+                  />
                 </Field>
-
-                <div className="op-form-row">
-                  <Field label="Graded market price (USD)">
-                    <div className="op-graded-price-row">
-                      <input
-                        type="number" step="0.01" placeholder="0.00"
-                        value={gradedPrice} onChange={(e) => setGradedPrice(e.target.value)}
-                      />
-                      <button
-                        type="button"
-                        className="op-btn-ghost"
-                        onClick={refreshGradedPrice}
-                        disabled={fetchingPrice || !pcProductId}
-                        title="Fetch from PriceCharting"
-                      >
-                        {fetchingPrice ? <Loader2 size={14} className="op-spin" /> : <RefreshCw size={14} />}
-                        {fetchingPrice ? 'Fetching…' : 'Refresh'}
-                      </button>
-                    </div>
-                  </Field>
+                <div className="op-graded-meta">
+                  Auto-refresh paused — type the graded price manually. A graded
+                  pricing source (eBay sold data + fair-value model) is on the
+                  roadmap; until then graded value flows from this field.
                 </div>
-
-                {pcProductName && priceFetchedAt && (
-                  <div className="op-graded-meta">
-                    Using <strong>{pcProductName}</strong> · fetched {new Date(priceFetchedAt).toLocaleString()}
-                  </div>
-                )}
-                {isAggregateAcrossCompanies(grade) && (
-                  <div className="op-graded-caveat">
-                    Heads up: PriceCharting aggregates {gradingCompany} {grade} with all other grading companies at grade {grade}. Only grade 10 prices are company-specific.
-                  </div>
-                )}
-                {variantsError && <div className="op-graded-error">{variantsError}</div>}
-                {priceFetchError && <div className="op-graded-error">{priceFetchError}</div>}
           </div>
           )}
 
@@ -3649,13 +3524,6 @@ function CardDetailDrawer({ card, entries, collections, watchEntry, onClose, onA
         <div className="op-drawer-body">
           <div className="op-price-grid">
             <PriceCell label="Raw" value={`$${effectiveRawPrice(card).toFixed(2)}`} accent />
-            <PriceCell
-              label="PSA 10"
-              value={(() => {
-                const p = getCachedTierPrice(card.canonicalId || card.id, 'psa10');
-                return p != null ? `$${p.toFixed(2)}` : '—';
-              })()}
-            />
             <PriceCell
               label="14d trend"
               value={historyLoading ? '…' : `${trend >= 0 ? '+' : ''}${trend.toFixed(1)}%`}
