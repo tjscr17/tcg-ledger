@@ -238,6 +238,52 @@ export const searchTcgProducts = async (displayId) => {
   }
 };
 
+// Pick the TCGPlayer product that best matches a given catalog card. Score
+// weights, descending:
+//   +100  group_abbreviation (TCGPlayer set) matches the card's source set
+//          (card.setId normalized — "OP-11" → "OP11")
+//   + 60  is_parallel matches the card's isParallel flag
+//   + 10  has a market price (prefer products with actual pricing data)
+// Ties broken by market_price desc (the live/expensive printing is usually
+// the more recently listed one). Returns null if products is empty.
+export const pickBestMatchForCard = (card, products) => {
+  if (!card || !Array.isArray(products) || products.length === 0) return null;
+  const cardSetNorm = (card.setId || '').replace(/-/g, '').toUpperCase();
+  const wantsParallel = Boolean(card.isParallel);
+  const scored = products.map(p => {
+    let score = 0;
+    const abbrNorm = (p.group_abbreviation || '').replace(/-/g, '').toUpperCase();
+    if (cardSetNorm && abbrNorm && abbrNorm === cardSetNorm) score += 100;
+    if (Boolean(p.is_parallel) === wantsParallel) score += 60;
+    if (p.market_price != null && p.market_price > 0) score += 10;
+    return { product: p, score, price: Number(p.market_price) || 0 };
+  });
+  scored.sort((a, b) => b.score - a.score || b.price - a.price);
+  return scored[0]?.product || null;
+};
+
+// Resolve a card by searching TCGCSV and picking the best match (set +
+// parallel flag aware). Persists the result via saveResolution so future
+// reads hit the cache. Returns the picked product or null. No-op if the
+// card already has a resolution.
+export const autoResolveCard = async (card) => {
+  if (!card) return null;
+  const cid = card.canonicalId || card.id;
+  if (!cid) return null;
+  // Already resolved? Don't waste a network round-trip.
+  if (getTcgId(cid, card.id)) {
+    const existing = getResolution(cid);
+    if (existing) return existing;
+  }
+  const number = cardNumberFromCanonical(cid) || card.displayId;
+  if (!number) return null;
+  const products = await searchTcgProducts(number);
+  const pick = pickBestMatchForCard(card, products);
+  if (!pick) return null;
+  saveResolution(cid, pick);
+  return pick;
+};
+
 // Persist the user's chosen TCGPlayer product for a card. Writes to the
 // local resolution cache (synchronous), then fire-and-forget syncs to
 // shared mode's card_resolutions table. The price snapshot is also written
@@ -248,6 +294,7 @@ export const saveResolution = (cardId, productSummary) => {
   const summary = {
     tcg_id: tcgId,
     group_id: productSummary.group_id,
+    group_abbreviation: productSummary.group_abbreviation || '',
     name: productSummary.name || '',
     clean_name: productSummary.clean_name || '',
     image_url: productSummary.image_url || '',
@@ -292,6 +339,95 @@ export const saveResolution = (cardId, productSummary) => {
       snapshot: summary,
     }).catch(() => {});
   }
+};
+
+// Local-only flag store for cards whose resolution looks wrong. Used by the
+// Resolve view to surface a "Reported" queue and as a hint that the user
+// wants to re-check this card. Shape: `{ [cardId]: { note, reported_at,
+// pick_at_report } }` where pick_at_report is a snapshot of the resolution
+// the user was reporting (so we can show "you flagged this when it pointed
+// at <name>").
+const MATCH_REPORTS_KEY = 'optcg:match-reports:v1';
+
+const readReports = () => {
+  try {
+    const raw = localStorage.getItem(MATCH_REPORTS_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch { return {}; }
+};
+const writeReports = (reports) => {
+  try { localStorage.setItem(MATCH_REPORTS_KEY, JSON.stringify(reports)); } catch {}
+};
+
+// Flag a card's current resolution as a bad match. `note` is an optional
+// free-text hint the user types. Returns the saved report row.
+export const reportBadMatch = (cardId, note = '') => {
+  if (!cardId) return null;
+  const reports = readReports();
+  const pickAtReport = getResolution(cardId);
+  const row = {
+    note: (note || '').trim(),
+    reported_at: new Date().toISOString(),
+    pick_at_report: pickAtReport
+      ? {
+          tcg_id: pickAtReport.tcg_id,
+          name: pickAtReport.name,
+          is_parallel: pickAtReport.is_parallel,
+        }
+      : null,
+  };
+  reports[cardId] = row;
+  writeReports(reports);
+  return row;
+};
+
+// Sync read: returns the report row for a card, or null. Used by the
+// Resolve view to render a "you flagged this" pill.
+export const getMatchReport = (cardId) => {
+  if (!cardId) return null;
+  const reports = readReports();
+  return reports[cardId] || null;
+};
+
+// All reports as `{ cardId, ...row }[]`. Used to populate the "Reported"
+// queue in the Resolve view.
+export const getAllMatchReports = () => {
+  const reports = readReports();
+  return Object.entries(reports).map(([cardId, row]) => ({ cardId, ...row }));
+};
+
+// Clear a card's report (typically called after the user re-resolves it).
+export const clearMatchReport = (cardId) => {
+  if (!cardId) return;
+  const reports = readReports();
+  if (reports[cardId]) {
+    delete reports[cardId];
+    writeReports(reports);
+  }
+};
+
+// Diagnose a resolution: does the picked product's set match the card's
+// source set? Does the parallel flag match? Returns an object the Resolve
+// view uses to surface issues. Pure read.
+export const diagnoseResolution = (card, resolution) => {
+  if (!card || !resolution || !resolution.tcg_id) {
+    return { resolved: false, issues: [], setMatch: null, parallelMatch: null };
+  }
+  const cardSetNorm = (card.setId || '').replace(/-/g, '').toUpperCase();
+  const productSetNorm = (resolution.group_abbreviation || '')
+    .replace(/-/g, '')
+    .toUpperCase();
+  const setMatch = cardSetNorm && productSetNorm
+    ? cardSetNorm === productSetNorm
+    : null; // null = can't compare (one side missing)
+  const parallelMatch = Boolean(resolution.is_parallel) === Boolean(card.isParallel);
+  const issues = [];
+  if (setMatch === false) issues.push('set');
+  if (!parallelMatch) issues.push('parallel');
+  const snap = getCachedSnapshot(resolution.tcg_id);
+  const hasPrice = snap && Number(snap.market_price) > 0;
+  if (!hasPrice) issues.push('no-price');
+  return { resolved: true, issues, setMatch, parallelMatch, hasPrice };
 };
 
 // Forget a resolution (lets the user redo the picker). Only touches the

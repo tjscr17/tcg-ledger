@@ -33,6 +33,7 @@ const TCGCSV_USER_AGENT = 'optcg-ledger/1.0 (collection tracker, github.com/tjsc
 
 let productIndex = null;        // Map<productId, productInfo>
 let productsByNumber = null;    // Map<displayId, productId[]>
+let groupAbbrIndex = null;      // Map<groupId, abbreviation>
 let indexFetchedAt = 0;
 let indexPromise = null;
 const groupPricesCache = new Map();
@@ -81,8 +82,10 @@ const ensureIndex = async () => {
     const groups = await fetchJSON(`${TCGCSV_BASE}/${OP_TCG_CATEGORY_ID}/groups`);
     const byId = new Map();
     const byNumber = new Map();
+    const abbrIdx = new Map();
     // Sequential — TCGCSV is one-person-run; parallel hammering is rude.
     for (const g of groups.results || []) {
+      if (g.abbreviation) abbrIdx.set(g.groupId, g.abbreviation);
       try {
         const products = await fetchJSON(`${TCGCSV_BASE}/${OP_TCG_CATEGORY_ID}/${g.groupId}/products`);
         for (const p of products.results || []) {
@@ -101,6 +104,7 @@ const ensureIndex = async () => {
     }
     productIndex = byId;
     productsByNumber = byNumber;
+    groupAbbrIndex = abbrIdx;
     indexFetchedAt = Date.now();
     return byId;
   })().finally(() => { indexPromise = null; });
@@ -138,6 +142,7 @@ const productPayload = async (tcgId, info) => {
   return {
     tcg_id: tcgId,
     group_id: info.groupId,
+    group_abbreviation: groupAbbrIndex?.get(info.groupId) || '',
     name: info.name,
     clean_name: info.cleanName,
     image_url: info.imageUrl,

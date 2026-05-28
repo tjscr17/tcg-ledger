@@ -9,6 +9,8 @@ import {
   searchTcgProducts, saveResolution, getResolution, cardNumberFromCanonical,
   getCachedImageForCard,
   hydrateResolutionsFromShared, subscribeToSharedResolutions,
+  autoResolveCard, getTcgId, pickBestMatchForCard,
+  diagnoseResolution, reportBadMatch, getMatchReport, clearMatchReport, getAllMatchReports,
 } from './pricing.js';
 
 // Like useState, but persists to localStorage. `serialize`/`deserialize` are
@@ -65,9 +67,18 @@ const useEnhancedImage = (card) => {
     const fallback = card.imageUrl || getCachedImageForCard(card);
     if (fallback && fallback !== url) setUrl(fallback);
     if (!inView) return;
-    // Warm the TCGCSV market-price cache for any card with a known tcg_id.
-    // Fire-and-forget; onPriceResolved triggers downstream re-renders.
-    ensurePriceForCard(card);
+    const cid = card.canonicalId || card.id;
+    if (getTcgId(cid, card.id)) {
+      // Already resolved — just keep the price snapshot warm.
+      ensurePriceForCard(card);
+    } else {
+      // No tcg_id yet. Run the smart resolver: searches TCGCSV by card
+      // number, scores by set + parallel match, persists the pick. Fire-
+      // and-forget; the saveResolution emit triggers downstream re-renders.
+      autoResolveCard(card).then(picked => {
+        if (picked) ensurePriceForCard(card);
+      });
+    }
   }, [card, inView, url]);
 
   return [ref, url];
@@ -2945,6 +2956,29 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
 
   const cidOf = (c) => c.canonicalId || c.id;
   const isResolved = (c) => Boolean(getResolution(cidOf(c)));
+  const hasIssues = (c) => {
+    const r = getResolution(cidOf(c));
+    if (!r) return false;
+    const diag = diagnoseResolution(c, r);
+    return diag.issues.length > 0;
+  };
+  const isReported = (c) => Boolean(getMatchReport(cidOf(c)));
+
+  // Roll-up counts surfaced in the troubleshooting header.
+  const counts = useMemo(() => {
+    let resolved = 0, unresolved = 0, issues = 0, reported = 0;
+    for (const c of catalog) {
+      if (isReported(c)) reported++;
+      if (isResolved(c)) {
+        resolved++;
+        if (hasIssues(c)) issues++;
+      } else {
+        unresolved++;
+      }
+    }
+    return { resolved, unresolved, issues, reported, total: catalog.length };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [catalog, resolveRev]);
 
   const queue = useMemo(() => {
     if (filterMode === 'in-collection') {
@@ -2955,6 +2989,12 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
     if (filterMode === 'unresolved') {
       return catalog.filter(c => !isResolved(c));
     }
+    if (filterMode === 'issues') {
+      return catalog.filter(c => hasIssues(c));
+    }
+    if (filterMode === 'reported') {
+      return catalog.filter(c => isReported(c));
+    }
     return catalog;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [catalog, entries, filterMode, resolveRev]);
@@ -2963,7 +3003,7 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
     if (prefetching) return;
     const targets = catalog.filter(c => !isResolved(c));
     if (targets.length === 0) { alert('Everything is already resolved.'); return; }
-    if (!confirm(`Auto-resolve ${targets.length.toLocaleString()} unresolved card${targets.length === 1 ? '' : 's'} via TCGCSV? Picks the non-parallel base when one exists, otherwise the first match. You can override any choice manually afterwards.`)) return;
+    if (!confirm(`Auto-resolve ${targets.length.toLocaleString()} unresolved card${targets.length === 1 ? '' : 's'} via TCGCSV? Picks the TCGPlayer printing whose set matches the card's source set AND whose parallel flag matches. You can override any choice manually afterwards.`)) return;
     abortRef.current = false;
     setPrefetching(true);
     setPrefetchTotal(targets.length);
@@ -2982,10 +3022,10 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
         try {
           const number = cardNumberFromCanonical(cidOf(card)) || card.displayId;
           const products = await searchTcgProducts(number);
-          const baseFirst = [...products].sort(
-            (a, b) => (a.is_parallel ? 1 : 0) - (b.is_parallel ? 1 : 0)
-          );
-          const pick = baseFirst[0];
+          // Score-based: prefers products whose group_abbreviation matches
+          // the card's source set AND whose parallel flag matches. Falls
+          // through to non-parallel/has-a-price tiebreakers.
+          const pick = pickBestMatchForCard(card, products);
           if (pick) saveResolution(cidOf(card), pick);
           else setPrefetchFailed(f => f + 1);
         } catch {
@@ -3029,7 +3069,7 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
       } else {
         const saved = getResolution(currentCid);
         const chosen = (saved && matches.find(v => v.tcg_id === saved.tcg_id))
-          || matches.find(v => !v.is_parallel)
+          || pickBestMatchForCard(currentCard, matches)
           || matches[0];
         setSelectedPickId(String(chosen.tcg_id));
       }
@@ -3042,16 +3082,35 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
   }, [currentCard, currentCid]);
 
   const selected = candidates.find(v => String(v.tcg_id) === selectedPickId);
+  const currentResolution = currentCid ? getResolution(currentCid) : null;
+  const currentDiagnostic = currentCard ? diagnoseResolution(currentCard, currentResolution) : null;
+  const currentReport = currentCid ? getMatchReport(currentCid) : null;
+  const [reportNote, setReportNote] = useState('');
+  // Reset note input when the user moves to a different card.
+  useEffect(() => { setReportNote(''); }, [currentCid]);
 
   const handleSave = () => {
     if (selected && currentCard) {
       saveResolution(currentCid, selected);
+      // Saving a new pick implicitly resolves the report — clear it.
+      if (currentReport) clearMatchReport(currentCid);
       setResolveRev(r => r + 1);
     }
     setIndex(i => i + 1);
   };
   const handleSkip = () => setIndex(i => i + 1);
   const handleBack = () => setIndex(i => Math.max(0, i - 1));
+  const handleReport = () => {
+    if (!currentCard) return;
+    reportBadMatch(currentCid, reportNote);
+    setReportNote('');
+    setResolveRev(r => r + 1);
+  };
+  const handleClearReport = () => {
+    if (!currentCard) return;
+    clearMatchReport(currentCid);
+    setResolveRev(r => r + 1);
+  };
 
   return (
     <div className="op-view">
@@ -3063,17 +3122,26 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
         </div>
       </div>
 
+      <div className="op-stats">
+        <Stat label="Resolved" value={counts.resolved.toLocaleString()} accent />
+        <Stat label="Unresolved" value={counts.unresolved.toLocaleString()} />
+        <Stat label="Issues" value={counts.issues.toLocaleString()} sub="set or parallel mismatch / no price" tone={counts.issues > 0 ? 'neg' : null} />
+        <Stat label="Reported" value={counts.reported.toLocaleString()} sub="flagged by you for review" tone={counts.reported > 0 ? 'neg' : null} />
+      </div>
+
       <div className="op-filters">
         <FilterGroup label="Queue" value={filterMode} onChange={setFilterMode} mode="select" options={[
-          { v: 'unresolved', l: 'Unresolved cards only' },
+          { v: 'unresolved', l: `Unresolved (${counts.unresolved.toLocaleString()})` },
           { v: 'in-collection', l: 'Cards in my collections' },
-          { v: 'all', l: 'All cards' },
+          { v: 'issues', l: `Issues — set/parallel mismatch (${counts.issues.toLocaleString()})` },
+          { v: 'reported', l: `Reported by me (${counts.reported.toLocaleString()})` },
+          { v: 'all', l: `All cards (${counts.total.toLocaleString()})` },
         ]} />
 
         <div className="op-filter-group">
           <div className="op-filter-label">Bulk</div>
           {!prefetching ? (
-            <button className="op-btn-ghost" onClick={runPrefetch} title="Auto-resolve every unresolved card via TCGCSV (picks the base printing)">
+            <button className="op-btn-ghost" onClick={runPrefetch} title="Auto-resolve every unresolved card via TCGCSV (set + parallel aware)">
               <RefreshCw size={14} /> Auto-resolve all
             </button>
           ) : (
@@ -3178,12 +3246,75 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
                     </span>
                   </div>
                   <div className="op-resolve-price-row">
-                    <span className="op-resolve-price-label">Rarity · type</span>
+                    <span className="op-resolve-price-label">Rarity · type · set</span>
                     <span className="op-resolve-price-val">
-                      {(selected.rarity || '—')} · {selected.sub_type_name || '—'}
+                      {(selected.rarity || '—')} · {selected.sub_type_name || '—'} · {selected.group_abbreviation || '?'}
                     </span>
                   </div>
                 </div>
+              )}
+
+              {/* Diagnostics: surfaces why this card is in the queue / what's
+                  off about its current resolution. Only shown when there IS
+                  an existing resolution to evaluate. */}
+              {currentDiagnostic?.resolved && (
+                <div className={`op-resolve-diag ${currentDiagnostic.issues.length > 0 ? 'has-issues' : 'is-ok'}`}>
+                  <div className="op-resolve-diag-head">Current resolution</div>
+                  <div className="op-resolve-diag-row">
+                    <span>TCGPlayer pick</span>
+                    <strong>{currentResolution?.name || '(unnamed)'}</strong>
+                  </div>
+                  <div className="op-resolve-diag-row">
+                    <span>Set match</span>
+                    <strong className={currentDiagnostic.setMatch === false ? 'is-warn' : ''}>
+                      {currentDiagnostic.setMatch === true ? '✓ same set'
+                       : currentDiagnostic.setMatch === false ? `✗ ${currentResolution?.group_abbreviation || '?'} ≠ ${(currentCard.setId || '').replace(/-/g, '')}`
+                       : '—'}
+                    </strong>
+                  </div>
+                  <div className="op-resolve-diag-row">
+                    <span>Parallel match</span>
+                    <strong className={!currentDiagnostic.parallelMatch ? 'is-warn' : ''}>
+                      {currentDiagnostic.parallelMatch
+                        ? (currentCard.isParallel ? '✓ both parallel' : '✓ both base')
+                        : `✗ catalog ${currentCard.isParallel ? 'parallel' : 'base'} vs pick ${currentResolution?.is_parallel ? 'parallel' : 'base'}`}
+                    </strong>
+                  </div>
+                  <div className="op-resolve-diag-row">
+                    <span>Market price</span>
+                    <strong className={!currentDiagnostic.hasPrice ? 'is-warn' : ''}>
+                      {currentDiagnostic.hasPrice ? '✓ cached' : '✗ none yet'}
+                    </strong>
+                  </div>
+                  {currentReport && (
+                    <div className="op-resolve-diag-report">
+                      <strong>⚑ You reported this</strong> on {new Date(currentReport.reported_at).toLocaleDateString()}
+                      {currentReport.note && <> — "{currentReport.note}"</>}
+                      {currentReport.pick_at_report && currentReport.pick_at_report.tcg_id !== currentResolution?.tcg_id && (
+                        <> · was pointing at <em>{currentReport.pick_at_report.name}</em></>
+                      )}
+                      <button className="op-btn-ghost" style={{ marginLeft: 8, padding: '2px 8px' }} onClick={handleClearReport}>
+                        Clear flag
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {!currentReport && (
+                <details className="op-resolve-report">
+                  <summary>Report this match as wrong</summary>
+                  <div style={{ marginTop: 6, display: 'flex', gap: 6, alignItems: 'center' }}>
+                    <input
+                      type="text"
+                      placeholder="(optional) what's wrong — e.g. 'this is the alt art, not the base'"
+                      value={reportNote}
+                      onChange={(e) => setReportNote(e.target.value)}
+                      style={{ flex: 1, padding: '6px 10px', border: '1px solid var(--line-strong)', background: 'var(--paper)' }}
+                    />
+                    <button className="op-btn-ghost" onClick={handleReport}>Flag</button>
+                  </div>
+                </details>
               )}
 
               {error && <div className="op-graded-error">{error}</div>}
