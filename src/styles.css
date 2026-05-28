@@ -797,6 +797,10 @@ body { background: var(--paper); }
 }
 .op-cert-pick:hover { background: var(--paper-warm); }
 .op-cert-pick.is-active { background: var(--ink); color: var(--paper); }
+/* Inner `.op-entry-id` spans hard-code color: var(--ink) — make them follow
+   the pill's color when the pill is active so the id stays readable. */
+.op-cert-pick.is-active .op-entry-id,
+.op-cert-pick.is-active * { color: inherit; }
 .op-cert-candidates {
   margin-top: 6px; display: flex; flex-wrap: wrap; gap: 4px;
 }

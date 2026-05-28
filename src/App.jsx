@@ -1309,7 +1309,7 @@ function EntryRow({ entry, card, marketValue, marketKnown = true, expenses = 0, 
             <span className="op-entry-cardname-text">{card.name}</span>
             <VariantPill variant={card.variant} />
             {isGraded
-              ? <GradingBadge company={entry.grading_company} grade={entry.grade} bgsBlack={entry.bgs_black} />
+              ? <GradingBadge company={entry.grading_company} grade={entry.grade} bgsBlack={entry.bgs_black} gradeDescription={entry.grade_description} />
               : <RawBadge condition={entry.condition} />}
           </div>
           <div className="op-entry-cardset">
@@ -1359,11 +1359,16 @@ function EntryRow({ entry, card, marketValue, marketKnown = true, expenses = 0, 
   );
 }
 
-function GradingBadge({ company, grade, bgsBlack }) {
+function GradingBadge({ company, grade, bgsBlack, gradeDescription }) {
   const label = bgsBlack ? `${company} ${grade} BL` : `${company} ${grade}`;
   const classKey = bgsBlack ? 'bgs-black' : (company || '').toLowerCase();
+  // Prefer the verbatim PSA grade description on hover when it's available
+  // ("GEM MT 10"); else fall back to "BGS 10 Black Label" or "PSA 10".
+  const titleText = bgsBlack
+    ? `${company} ${grade} Black Label (Perfect 10)`
+    : (gradeDescription || `${company} ${grade}`);
   return (
-    <span className={`op-grade-badge is-${classKey}`} title={bgsBlack ? `${company} ${grade} Black Label (Perfect 10)` : `${company} ${grade}`}>
+    <span className={`op-grade-badge is-${classKey}`} title={titleText}>
       <Award size={11} />
       {label}
     </span>
@@ -1947,11 +1952,27 @@ function AddByCertModal({ catalog, collections, activeCollectionId, onClose, onS
   const [overrideCardId, setOverrideCardId] = useState(''); // when no auto-match
   const [collectionId, setCollectionId] = useState(activeCollectionId || collections[0]?.id || null);
   const [purchasePrice, setPurchasePrice] = useState('');
+  const [gradedPrice, setGradedPrice] = useState('');
+  const [contributions, setContributions] = useState([]);
   const [acquiredAt, setAcquiredAt] = useState(new Date().toISOString().slice(0, 10));
   const [notes, setNotes] = useState('');
   const [saving, setSaving] = useState(false);
 
   const collectionsList = collections.filter(c => c.id !== 'all');
+
+  // Members for the contribution dropdowns come from the selected collection.
+  const members = useMemo(() => {
+    const col = collections.find(c => c.id === collectionId);
+    return Array.isArray(col?.members) ? col.members : [];
+  }, [collections, collectionId]);
+
+  const addContribRow = () => setContributions([...contributions, { name: '', amount: '' }]);
+  const updateContrib = (i, patch) => setContributions(contributions.map((c, idx) => idx === i ? { ...c, ...patch } : c));
+  const removeContrib = (i) => setContributions(contributions.filter((_, idx) => idx !== i));
+
+  const priceNum = Number(purchasePrice) || 0;
+  const contribTotal = contributions.reduce((s, c) => s + (Number(c.amount) || 0), 0);
+  const contribMismatch = contributions.length > 0 && Math.abs(contribTotal - priceNum) > 0.01;
 
   const doLookup = async () => {
     setError('');
@@ -1992,19 +2013,18 @@ function AddByCertModal({ catalog, collections, activeCollectionId, onClose, onS
       card_id: card.canonicalId || card.id,
       collection_id: collectionId,
       condition: 'Near Mint',
-      purchase_price: Number(purchasePrice) || 0,
-      contributions: [],
+      purchase_price: priceNum,
+      contributions: contributions
+        .filter(c => c.name.trim() && Number(c.amount) > 0)
+        .map(c => ({ name: c.name.trim(), amount: Number(c.amount) })),
       notes: notes.trim(),
       acquired_at: acquiredAt || null,
       grading_company: 'PSA',
       grade: cert.grade,
+      grade_description: cert.grade_description || '',
       bgs_black: false,
       cert_number: cert.cert_number,
-      graded_price: 0,
-      pc_product_id: '',
-      pc_product_name: '',
-      price_source: '',
-      price_fetched_at: null,
+      graded_price: Number(gradedPrice) || 0,
     });
     setSaving(false);
   };
@@ -2158,6 +2178,53 @@ function AddByCertModal({ catalog, collections, activeCollectionId, onClose, onS
                 </Field>
                 <Field label="Date acquired">
                   <input type="date" value={acquiredAt} onChange={(e) => setAcquiredAt(e.target.value)} />
+                </Field>
+              </div>
+
+              <div className="op-form-section">
+                <div className="op-form-section-head">
+                  <div>
+                    <div className="op-form-section-title">Who paid what</div>
+                    <div className="op-form-section-sub">Split cost between people. Leave empty if one person paid in full.</div>
+                  </div>
+                  <button className="op-btn-ghost" onClick={addContribRow}>
+                    <Plus size={14} /> Add split
+                  </button>
+                </div>
+                {contributions.map((c, i) => (
+                  <ContribRow
+                    key={i}
+                    value={c}
+                    members={members}
+                    onChange={(patch) => updateContrib(i, patch)}
+                    onRemove={() => removeContrib(i)}
+                  />
+                ))}
+                {contributions.length > 0 && (
+                  <div className={`op-contrib-check ${contribMismatch ? 'is-warn' : 'is-ok'}`}>
+                    Splits total: <strong>${contribTotal.toFixed(2)}</strong> of <strong>${priceNum.toFixed(2)}</strong>
+                    {contribMismatch && <span> · doesn't match total paid</span>}
+                  </div>
+                )}
+              </div>
+
+              <div className="op-form-section">
+                <div className="op-form-section-head">
+                  <div>
+                    <div className="op-form-section-title">
+                      <Award size={14} style={{ verticalAlign: 'middle', marginRight: 6 }} />
+                      Grade · {cert.grade_description || (cert.grade != null ? `PSA ${cert.grade}` : 'PSA')}
+                    </div>
+                    <div className="op-form-section-sub">
+                      Pulled from PSA. Enter a graded market price manually; auto-fetch is parked until a graded data source lands.
+                    </div>
+                  </div>
+                </div>
+                <Field label="Graded market price (USD)">
+                  <input
+                    type="number" step="0.01" placeholder="0.00"
+                    value={gradedPrice} onChange={(e) => setGradedPrice(e.target.value)}
+                  />
                 </Field>
               </div>
 
@@ -3562,7 +3629,7 @@ function CardDetailDrawer({ card, entries, collections, watchEntry, onClose, onA
                       <div>
                         <div className="op-detail-entry-collection">
                           {col?.name || 'Unknown collection'}
-                          {isGraded && <GradingBadge company={entry.grading_company} grade={entry.grade} bgsBlack={entry.bgs_black} />}
+                          {isGraded && <GradingBadge company={entry.grading_company} grade={entry.grade} bgsBlack={entry.bgs_black} gradeDescription={entry.grade_description} />}
                         </div>
                         <div className="op-detail-entry-meta">
                           {isGraded ? `${entry.grading_company} ${entry.grade}${entry.bgs_black ? ' Black Label' : ''}` : entry.condition} · Paid ${Number(entry.purchase_price || 0).toFixed(2)}

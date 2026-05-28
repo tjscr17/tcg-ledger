@@ -86,6 +86,13 @@ const solo = {
 //   --   alter table entries add column if not exists bgs_black boolean default false;
 //   --   notify pgrst, 'reload schema';
 //
+//   -- entries also gains an optional grade_description text for PSA's
+//   -- verbatim grade label ("GEM MT 10", "MINT 9", "EX-MT 6", "Authentic").
+//   -- Saved from AddByCertModal; AddCardModal leaves it null. Run if your
+//   -- entries table predates it:
+//   --   alter table entries add column if not exists grade_description text;
+//   --   notify pgrst, 'reload schema';
+//
 //   -- transactions gains an optional entry_id to link buys/sells to their
 //   -- originating entry. Required for "move card between collections" to
 //   -- carry the capital allocation. Backfilling is automatic — moving an
