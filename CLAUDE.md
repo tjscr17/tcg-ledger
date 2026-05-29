@@ -102,7 +102,10 @@ the Resolve view. The mapping lives in:
   unresolved count wouldn't drop). The Map decouples reads from that limit.
 - **Supabase** (shared mode) — `card_resolutions.tcg_id` plus a `snapshot`
   jsonb with the product summary so teammates skip the search. The durable
-  store across sessions in shared mode.
+  store across sessions in shared mode. `listResolutions` **pages through
+  with `.range()`** — a plain `.select()` is capped at PostgREST's 1000-row
+  default, so a full-catalog vault would only hydrate the first 1000 and the
+  rest would re-resolve on every refresh.
 
 In shared mode the Supabase load is async, so `autoResolveCard` awaits a
 `whenResolutionsReady()` gate (resolved by `hydrateResolutionsFromShared` on

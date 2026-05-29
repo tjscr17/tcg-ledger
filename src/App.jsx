@@ -9,6 +9,7 @@ import {
   searchTcgProducts, saveResolution, getResolution, clearResolution, cardNumberFromCanonical,
   getCachedImageForCard,
   hydrateResolutionsFromShared, subscribeToSharedResolutions, whenResolutionsReady,
+  getHydratedResolutionCount,
   autoResolveCard, getTcgId, pickBestMatchForCard, confidentMatchForCard,
   diagnoseResolution, reportBadMatch, getMatchReport, clearMatchReport, getAllMatchReports,
 } from './pricing.js';
@@ -3169,6 +3170,11 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
           <div className="op-eyebrow">Catalog cleanup</div>
           <h1 className="op-page-title">Resolve cards</h1>
           <div className="op-page-sub">Pick the correct TCGPlayer printing for each card. Saves wire up the raw market price (TCGCSV) and TCGPlayer art.</div>
+          {getHydratedResolutionCount() >= 0 && (
+            <div className="op-page-sub" style={{ marginTop: 4 }}>
+              ☁ {getHydratedResolutionCount().toLocaleString()} resolutions loaded from cloud
+            </div>
+          )}
         </div>
       </div>
 

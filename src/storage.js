@@ -233,12 +233,26 @@ const shared = {
     return () => supa.removeChannel(channel);
   },
   async listResolutions() {
-    const { data, error } = await supa
-      .from('card_resolutions')
-      .select('card_id, tcg_id, snapshot')
-      .eq('vault_key', VAULT_KEY);
-    if (error) { console.error('listResolutions failed', error); return []; }
-    return data || [];
+    // PostgREST caps a single select at the project's max-rows (1000 by
+    // default). A full catalog easily exceeds that, so page through with
+    // .range() until a short page signals the end — otherwise only the first
+    // 1000 resolutions hydrate and the rest re-resolve on every refresh.
+    const PAGE = 1000;
+    const all = [];
+    let from = 0;
+    for (;;) {
+      const { data, error } = await supa
+        .from('card_resolutions')
+        .select('card_id, tcg_id, snapshot')
+        .eq('vault_key', VAULT_KEY)
+        .range(from, from + PAGE - 1);
+      if (error) { console.error('listResolutions failed', error); break; }
+      if (!data || data.length === 0) break;
+      all.push(...data);
+      from += data.length;
+      if (data.length < PAGE) break;
+    }
+    return all;
   },
   async upsertResolution(cardId, payload) {
     const { error } = await supa

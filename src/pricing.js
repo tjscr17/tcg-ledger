@@ -50,6 +50,12 @@ const resolutionsReady = MODE === 'shared'
   : Promise.resolve();
 export const whenResolutionsReady = () => resolutionsReady;
 
+// How many resolutions the last shared-mode hydrate pulled from Supabase.
+// -1 = not hydrated yet (or solo mode). Surfaced in the Resolve view so the
+// user can confirm the cloud load worked without opening the console.
+let lastHydratedCount = -1;
+export const getHydratedResolutionCount = () => lastHydratedCount;
+
 const ensureResolutionMap = () => {
   if (resolutionMap) return resolutionMap;
   resolutionMap = new Map();
@@ -541,8 +547,8 @@ export const hydrateResolutionsFromShared = async () => {
   // so autoResolveCard never hangs waiting on a load that failed.
   try {
     let rows;
-    try { rows = await store.listResolutions(); } catch { return 0; }
-    if (!rows || rows.length === 0) return 0;
+    try { rows = await store.listResolutions(); } catch { lastHydratedCount = 0; return 0; }
+    if (!rows || rows.length === 0) { lastHydratedCount = 0; return 0; }
     const map = ensureResolutionMap();
     let writes = 0;
     for (const row of rows) {
@@ -556,6 +562,7 @@ export const hydrateResolutionsFromShared = async () => {
       });
       writes++;
     }
+    lastHydratedCount = writes;
     scheduleResolutionPersist();
     // Don't emit on initial hydrate — listeners haven't subscribed yet and a
     // batch of bumps would be wasted. Future remote updates are pushed via
