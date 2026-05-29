@@ -370,7 +370,7 @@ export const autoResolveCard = async (card) => {
 // local resolution cache (synchronous), then fire-and-forget syncs to
 // shared mode's card_resolutions table. The price snapshot is also written
 // to the price cache so the UI shows it instantly without an extra fetch.
-export const saveResolution = (cardId, productSummary) => {
+export const saveResolution = (cardId, productSummary, { confirmed = false } = {}) => {
   if (!cardId || !productSummary?.tcg_id) return;
   const tcgId = Number(productSummary.tcg_id);
   const summary = {
@@ -384,6 +384,10 @@ export const saveResolution = (cardId, productSummary) => {
     tcgplayer_url: productSummary.tcgplayer_url || '',
     rarity: productSummary.rarity || '',
     is_parallel: Boolean(productSummary.is_parallel),
+    // Set when a human explicitly picked this printing (manual Save in the
+    // resolver). Confirmed picks are exempt from the Issues queue — the
+    // set/parallel flag check is a heuristic, and the user is the authority.
+    confirmed: Boolean(confirmed),
     saved_at: Date.now(),
   };
   // Map write is the durable in-session record and never fails on quota.

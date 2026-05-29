@@ -2976,6 +2976,9 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
   const hasIssues = (c) => {
     const r = getResolution(cidOf(c));
     if (!r) return false;
+    // A human-confirmed pick is never an "issue" — the set/parallel check is
+    // just a heuristic, and saving in the resolver is the user overruling it.
+    if (r.confirmed) return false;
     const diag = diagnoseResolution(c, r);
     return diag.issues.length > 0;
   };
@@ -3128,7 +3131,9 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
 
   const handleSave = () => {
     if (selected && currentCard) {
-      saveResolution(currentCid, selected);
+      // Manual save = the user confirming this printing. Marks it confirmed so
+      // it leaves the Issues queue even if the heuristic still flags a mismatch.
+      saveResolution(currentCid, selected, { confirmed: true });
       // Saving a new pick implicitly resolves the report — clear it.
       if (currentReport) clearMatchReport(currentCid);
       setResolveRev(r => r + 1);
@@ -3361,8 +3366,14 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
                   off about its current resolution. Only shown when there IS
                   an existing resolution to evaluate. */}
               {currentDiagnostic?.resolved && (
-                <div className={`op-resolve-diag ${currentDiagnostic.issues.length > 0 ? 'has-issues' : 'is-ok'}`}>
+                <div className={`op-resolve-diag ${currentDiagnostic.issues.length > 0 && !currentResolution?.confirmed ? 'has-issues' : 'is-ok'}`}>
                   <div className="op-resolve-diag-head">Current resolution</div>
+                  {currentResolution?.confirmed && (
+                    <div className="op-resolve-diag-row">
+                      <span>Status</span>
+                      <strong>✓ confirmed by you</strong>
+                    </div>
+                  )}
                   <div className="op-resolve-diag-row">
                     <span>TCGPlayer pick</span>
                     <strong>{currentResolution?.name || '(unnamed)'}</strong>
