@@ -8,7 +8,7 @@ import {
   getMarketPriceForCard, ensurePriceForCard, onPriceResolved,
   searchTcgProducts, saveResolution, getResolution, clearResolution, cardNumberFromCanonical,
   getCachedImageForCard,
-  hydrateResolutionsFromShared, subscribeToSharedResolutions,
+  hydrateResolutionsFromShared, subscribeToSharedResolutions, whenResolutionsReady,
   autoResolveCard, getTcgId, pickBestMatchForCard, confidentMatchForCard,
   diagnoseResolution, reportBadMatch, getMatchReport, clearMatchReport, getAllMatchReports,
 } from './pricing.js';
@@ -2957,6 +2957,18 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
   // Bump on a resolution save so the "unresolved" queue + currentCard state
   // re-derive after the user picks something.
   const [resolveRev, setResolveRev] = useState(0);
+
+  // The counts/queue memos read the in-memory resolution Map, but in shared
+  // mode that Map is hydrated from Supabase asynchronously AFTER first paint.
+  // Hydration doesn't bump resolveRev, so without this the page would show the
+  // (overflowed, partial) localStorage warm-start counts and never refresh to
+  // the real Supabase-backed totals — looking like a "reset" on every load.
+  // Bump once the load lands so everything re-derives from the full Map.
+  useEffect(() => {
+    let cancelled = false;
+    whenResolutionsReady().then(() => { if (!cancelled) setResolveRev(r => r + 1); });
+    return () => { cancelled = true; };
+  }, []);
 
   const cidOf = (c) => c.canonicalId || c.id;
   const isResolved = (c) => Boolean(getResolution(cidOf(c)));
