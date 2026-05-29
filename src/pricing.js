@@ -37,6 +37,19 @@ const RESOLUTION_CACHE_KEY = 'optcg:tcgcsv:resolutions:v1';
 let resolutionMap = null;       // Map<cardId, summary> | null until hydrated
 let resolutionPersistTimer = null;
 
+// "Resolutions ready" gate. In shared mode the durable resolutions live in
+// Supabase and load asynchronously (hydrateResolutionsFromShared). Until that
+// lands, the Map is only warm-started from localStorage — which overflows at
+// full-catalog scale and can't hold everything — so a card can look unresolved
+// when it actually isn't. autoResolveCard awaits this before deciding to do a
+// (redundant, network-hammering) re-resolve. Solo mode is ready immediately:
+// localStorage is the only store and ensureResolutionMap reads it synchronously.
+let markResolutionsReady;
+const resolutionsReady = MODE === 'shared'
+  ? new Promise((resolve) => { markResolutionsReady = resolve; })
+  : Promise.resolve();
+export const whenResolutionsReady = () => resolutionsReady;
+
 const ensureResolutionMap = () => {
   if (resolutionMap) return resolutionMap;
   resolutionMap = new Map();
@@ -329,6 +342,10 @@ export const autoResolveCard = async (card) => {
   if (!card) return null;
   const cid = card.canonicalId || card.id;
   if (!cid) return null;
+  // Wait for shared-mode Supabase resolutions to load before treating this
+  // card as unresolved — otherwise every page refresh re-resolves cards that
+  // are already saved (see the resolutionsReady gate above).
+  await whenResolutionsReady();
   // Already resolved? Don't waste a network round-trip.
   if (getTcgId(cid, card.id)) {
     const existing = getResolution(cid);
@@ -503,27 +520,33 @@ export const clearResolution = (cardId) => {
 // app boot when MODE === 'shared'; in solo mode this is a no-op (returns 0).
 export const hydrateResolutionsFromShared = async () => {
   if (MODE !== 'shared') return 0;
-  let rows;
-  try { rows = await store.listResolutions(); } catch { return 0; }
-  if (!rows || rows.length === 0) return 0;
-  const map = ensureResolutionMap();
-  let writes = 0;
-  for (const row of rows) {
-    if (!row.card_id || !row.tcg_id) continue;
-    const tcgId = Number(row.tcg_id);
-    if (!Number.isFinite(tcgId) || tcgId <= 0) continue;
-    map.set(row.card_id, {
-      ...(row.snapshot && typeof row.snapshot === 'object' ? row.snapshot : {}),
-      tcg_id: tcgId,
-      saved_at: map.get(row.card_id)?.saved_at || Date.now(),
-    });
-    writes++;
+  // Always open the readiness gate when we finish (success, empty, or error)
+  // so autoResolveCard never hangs waiting on a load that failed.
+  try {
+    let rows;
+    try { rows = await store.listResolutions(); } catch { return 0; }
+    if (!rows || rows.length === 0) return 0;
+    const map = ensureResolutionMap();
+    let writes = 0;
+    for (const row of rows) {
+      if (!row.card_id || !row.tcg_id) continue;
+      const tcgId = Number(row.tcg_id);
+      if (!Number.isFinite(tcgId) || tcgId <= 0) continue;
+      map.set(row.card_id, {
+        ...(row.snapshot && typeof row.snapshot === 'object' ? row.snapshot : {}),
+        tcg_id: tcgId,
+        saved_at: map.get(row.card_id)?.saved_at || Date.now(),
+      });
+      writes++;
+    }
+    scheduleResolutionPersist();
+    // Don't emit on initial hydrate — listeners haven't subscribed yet and a
+    // batch of bumps would be wasted. Future remote updates are pushed via
+    // subscribeToSharedResolutions.
+    return writes;
+  } finally {
+    markResolutionsReady?.();
   }
-  scheduleResolutionPersist();
-  // Don't emit on initial hydrate — listeners haven't subscribed yet and a
-  // batch of bumps would be wasted. Future remote updates are pushed via
-  // subscribeToSharedResolutions.
-  return writes;
 };
 
 // Subscribe to real-time updates from teammates' resolutions. Returns an

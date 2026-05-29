@@ -104,6 +104,13 @@ the Resolve view. The mapping lives in:
   jsonb with the product summary so teammates skip the search. The durable
   store across sessions in shared mode.
 
+In shared mode the Supabase load is async, so `autoResolveCard` awaits a
+`whenResolutionsReady()` gate (resolved by `hydrateResolutionsFromShared` on
+any exit path) before treating a card as unresolved. Without it, every page
+refresh re-resolves already-saved cards: the viewport-driven `useEnhancedImage`
+fires before hydration lands, the Map is only warm-started from (overflowing)
+localStorage, so cards look unresolved and trigger redundant TCGCSV searches.
+
 `pricing.js` exposes `getTcgId(cardId)`, `getMarketPriceForCard(card)`,
 `ensurePriceForCard(card)` (fire-and-forget warm-up), `searchTcgProducts(displayId)`,
 and `saveResolution(cardId, product)`. The `onPriceResolved` emitter
