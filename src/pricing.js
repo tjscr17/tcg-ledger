@@ -482,9 +482,12 @@ export const diagnoseResolution = (card, resolution) => {
   const issues = [];
   if (setMatch === false) issues.push('set');
   if (!parallelMatch) issues.push('parallel');
+  // A missing price is a TCGCSV data gap (no recent sales, or just not fetched
+  // yet), NOT a bad match — so it is reported via `hasPrice` for display but
+  // deliberately does NOT count as an issue. Otherwise a correctly-matched
+  // card with no price would be stuck in the Issues queue forever.
   const snap = getCachedSnapshot(resolution.tcg_id);
   const hasPrice = snap && Number(snap.market_price) > 0;
-  if (!hasPrice) issues.push('no-price');
   return { resolved: true, issues, setMatch, parallelMatch, hasPrice };
 };
 

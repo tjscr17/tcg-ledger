@@ -3119,9 +3119,19 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
       // Saving a new pick implicitly resolves the report — clear it.
       if (currentReport) clearMatchReport(currentCid);
       setResolveRev(r => r + 1);
-      // In removal queues the saved card drops out and the next one shifts
-      // into this index, so leave index alone. Elsewhere, advance.
-      if (!isRemovalQueue) setIndex(i => i + 1);
+      // In removal queues the saved card usually drops out and the next one
+      // slides into this index, so we hold the index. But a save doesn't
+      // always remove the card: in the Issues queue the only available
+      // printing may still mismatch the set/parallel flag or have no price,
+      // so the card keeps qualifying. Re-check the queue predicate against
+      // the just-saved state (Map + report store are updated synchronously);
+      // if the card is still in this queue, advance so the user isn't stuck.
+      const stillQualifies =
+        filterMode === 'unresolved' ? !isResolved(currentCard)
+        : filterMode === 'issues' ? hasIssues(currentCard)
+        : filterMode === 'reported' ? isReported(currentCard)
+        : false;
+      if (!isRemovalQueue || stillQualifies) setIndex(i => i + 1);
     } else {
       setIndex(i => i + 1);
     }
@@ -3153,7 +3163,7 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
       <div className="op-stats">
         <Stat label="Resolved" value={counts.resolved.toLocaleString()} accent />
         <Stat label="Unresolved" value={counts.unresolved.toLocaleString()} />
-        <Stat label="Issues" value={counts.issues.toLocaleString()} sub="set or parallel mismatch / no price" tone={counts.issues > 0 ? 'neg' : null} />
+        <Stat label="Issues" value={counts.issues.toLocaleString()} sub="set or parallel mismatch" tone={counts.issues > 0 ? 'neg' : null} />
         <Stat label="Reported" value={counts.reported.toLocaleString()} sub="flagged by you for review" tone={counts.reported > 0 ? 'neg' : null} />
       </div>
 
