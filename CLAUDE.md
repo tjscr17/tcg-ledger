@@ -92,9 +92,17 @@ Phase 4–5) covers re-enabling this via eBay sold data + a fair-value model.
 A canonical card id maps to a TCGPlayer `productId` via the resolver in
 the Resolve view. The mapping lives in:
 
-- **localStorage** — `optcg:tcgcsv:resolutions:v1`, keyed by canonical id
+- **In-memory Map** (`resolutionMap` in `pricing.js`) — the source of truth
+  for all reads (`getTcgId`/`getResolution`). Lazy-hydrated from localStorage
+  on first access, then from Supabase in shared mode.
+- **localStorage** — `optcg:tcgcsv:resolutions:v1`, keyed by canonical id. A
+  warm-start cache only, written best-effort and debounced. Reads never touch
+  it directly: at full-catalog scale the single JSON blob can exceed the ~5MB
+  quota, and a swallowed write used to silently drop bulk resolutions (the
+  unresolved count wouldn't drop). The Map decouples reads from that limit.
 - **Supabase** (shared mode) — `card_resolutions.tcg_id` plus a `snapshot`
-  jsonb with the product summary so teammates skip the search
+  jsonb with the product summary so teammates skip the search. The durable
+  store across sessions in shared mode.
 
 `pricing.js` exposes `getTcgId(cardId)`, `getMarketPriceForCard(card)`,
 `ensurePriceForCard(card)` (fire-and-forget warm-up), `searchTcgProducts(displayId)`,

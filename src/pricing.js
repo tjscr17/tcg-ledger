@@ -25,22 +25,65 @@ const PRICE_TTL_MS = 6 * 60 * 60 * 1000; // 6h — TCGCSV refreshes daily, this 
 // here once before deleting the PC keys).
 const RESOLUTION_CACHE_KEY = 'optcg:tcgcsv:resolutions:v1';
 
+// An in-memory Map is the source of truth for resolution reads. localStorage
+// is only a warm-start cache. The reason: at full-catalog scale (thousands of
+// resolutions alongside the catalog + price caches) a single JSON blob blows
+// past the ~5MB localStorage quota. The old code read/wrote that blob directly
+// on every save inside a swallowed try/catch, so once the quota was hit every
+// write threw and was silently dropped — bulk "Auto-resolve all" reported
+// "3602 resolved" while the unresolved count never budged. Decoupling reads
+// from localStorage (Map for reads, Supabase as the durable store in shared
+// mode, best-effort debounced localStorage for warm starts) fixes that.
+let resolutionMap = null;       // Map<cardId, summary> | null until hydrated
+let resolutionPersistTimer = null;
+
+const ensureResolutionMap = () => {
+  if (resolutionMap) return resolutionMap;
+  resolutionMap = new Map();
+  try {
+    const raw = localStorage.getItem(RESOLUTION_CACHE_KEY);
+    if (raw) {
+      const obj = JSON.parse(raw);
+      for (const [cardId, summary] of Object.entries(obj)) {
+        if (cardId && summary) resolutionMap.set(cardId, summary);
+      }
+    }
+  } catch {}
+  return resolutionMap;
+};
+
+// Best-effort, debounced localStorage flush. Coalesces the thousands of writes
+// a bulk resolve produces into a single serialization and tolerates quota
+// failures — the Map (this session) and Supabase (across sessions, shared
+// mode) stay authoritative regardless.
+const persistResolutionsNow = () => {
+  if (!resolutionMap) return;
+  try {
+    const obj = {};
+    for (const [cardId, summary] of resolutionMap) obj[cardId] = summary;
+    localStorage.setItem(RESOLUTION_CACHE_KEY, JSON.stringify(obj));
+  } catch {}
+};
+
+const scheduleResolutionPersist = () => {
+  if (resolutionPersistTimer) return;
+  resolutionPersistTimer = setTimeout(() => {
+    resolutionPersistTimer = null;
+    persistResolutionsNow();
+  }, 500);
+};
+
 // Synchronous lookup: returns the TCGPlayer productId for a canonical
 // card id, or null when we haven't resolved one yet. Also tries the
 // legacy OPTCG-style id as a fallback key — useful right after the
 // canonical migration when a row may have been keyed under either form.
 export const getTcgId = (cardId, legacyId) => {
   if (!cardId && !legacyId) return null;
-  try {
-    const raw = localStorage.getItem(RESOLUTION_CACHE_KEY);
-    const cache = raw ? JSON.parse(raw) : {};
-    const hit = (cardId && cache[cardId]?.tcg_id)
-      || (legacyId && cache[legacyId]?.tcg_id)
-      || null;
-    return hit ? Number(hit) : null;
-  } catch {
-    return null;
-  }
+  const map = ensureResolutionMap();
+  const hit = (cardId && map.get(cardId)?.tcg_id)
+    || (legacyId && map.get(legacyId)?.tcg_id)
+    || null;
+  return hit ? Number(hit) : null;
 };
 
 // Synchronous lookup of the full resolution summary (name, image, parallel
@@ -49,11 +92,7 @@ export const getTcgId = (cardId, legacyId) => {
 // show "previously picked" state.
 export const getResolution = (cardId) => {
   if (!cardId) return null;
-  try {
-    const raw = localStorage.getItem(RESOLUTION_CACHE_KEY);
-    const cache = raw ? JSON.parse(raw) : {};
-    return cache[cardId] || null;
-  } catch { return null; }
+  return ensureResolutionMap().get(cardId) || null;
 };
 
 const readCache = () => {
@@ -324,12 +363,9 @@ export const saveResolution = (cardId, productSummary) => {
     is_parallel: Boolean(productSummary.is_parallel),
     saved_at: Date.now(),
   };
-  try {
-    const raw = localStorage.getItem(RESOLUTION_CACHE_KEY);
-    const cache = raw ? JSON.parse(raw) : {};
-    cache[cardId] = summary;
-    localStorage.setItem(RESOLUTION_CACHE_KEY, JSON.stringify(cache));
-  } catch {}
+  // Map write is the durable in-session record and never fails on quota.
+  ensureResolutionMap().set(cardId, summary);
+  scheduleResolutionPersist();
 
   // Also seed the price cache so UI doesn't need to wait for a re-fetch.
   if (productSummary.market_price != null) {
@@ -456,14 +492,8 @@ export const diagnoseResolution = (card, resolution) => {
 // local cache; shared mode keeps the row until next resolution overwrites.
 export const clearResolution = (cardId) => {
   if (!cardId) return;
-  try {
-    const raw = localStorage.getItem(RESOLUTION_CACHE_KEY);
-    const cache = raw ? JSON.parse(raw) : {};
-    if (cache[cardId]) {
-      delete cache[cardId];
-      localStorage.setItem(RESOLUTION_CACHE_KEY, JSON.stringify(cache));
-    }
-  } catch {}
+  const map = ensureResolutionMap();
+  if (map.delete(cardId)) scheduleResolutionPersist();
 };
 
 // Pull every shared-mode resolution row into the local cache. Run once on
@@ -473,23 +503,20 @@ export const hydrateResolutionsFromShared = async () => {
   let rows;
   try { rows = await store.listResolutions(); } catch { return 0; }
   if (!rows || rows.length === 0) return 0;
+  const map = ensureResolutionMap();
   let writes = 0;
-  try {
-    const raw = localStorage.getItem(RESOLUTION_CACHE_KEY);
-    const cache = raw ? JSON.parse(raw) : {};
-    for (const row of rows) {
-      if (!row.card_id || !row.tcg_id) continue;
-      const tcgId = Number(row.tcg_id);
-      if (!Number.isFinite(tcgId) || tcgId <= 0) continue;
-      cache[row.card_id] = {
-        ...(row.snapshot && typeof row.snapshot === 'object' ? row.snapshot : {}),
-        tcg_id: tcgId,
-        saved_at: cache[row.card_id]?.saved_at || Date.now(),
-      };
-      writes++;
-    }
-    localStorage.setItem(RESOLUTION_CACHE_KEY, JSON.stringify(cache));
-  } catch {}
+  for (const row of rows) {
+    if (!row.card_id || !row.tcg_id) continue;
+    const tcgId = Number(row.tcg_id);
+    if (!Number.isFinite(tcgId) || tcgId <= 0) continue;
+    map.set(row.card_id, {
+      ...(row.snapshot && typeof row.snapshot === 'object' ? row.snapshot : {}),
+      tcg_id: tcgId,
+      saved_at: map.get(row.card_id)?.saved_at || Date.now(),
+    });
+    writes++;
+  }
+  scheduleResolutionPersist();
   // Don't emit on initial hydrate — listeners haven't subscribed yet and a
   // batch of bumps would be wasted. Future remote updates are pushed via
   // subscribeToSharedResolutions.
@@ -505,16 +532,12 @@ export const subscribeToSharedResolutions = () => {
     if (!row || !row.card_id || !row.tcg_id) return;
     const tcgId = Number(row.tcg_id);
     if (!Number.isFinite(tcgId) || tcgId <= 0) return;
-    try {
-      const raw = localStorage.getItem(RESOLUTION_CACHE_KEY);
-      const cache = raw ? JSON.parse(raw) : {};
-      cache[row.card_id] = {
-        ...(row.snapshot && typeof row.snapshot === 'object' ? row.snapshot : {}),
-        tcg_id: tcgId,
-        saved_at: Date.now(),
-      };
-      localStorage.setItem(RESOLUTION_CACHE_KEY, JSON.stringify(cache));
-    } catch {}
+    ensureResolutionMap().set(row.card_id, {
+      ...(row.snapshot && typeof row.snapshot === 'object' ? row.snapshot : {}),
+      tcg_id: tcgId,
+      saved_at: Date.now(),
+    });
+    scheduleResolutionPersist();
     emit(tcgId);
   });
 };
