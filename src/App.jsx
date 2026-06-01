@@ -993,14 +993,15 @@ function EquityPanel({ entries, transactions = [], catalogIndex, totalMarket, co
   const equity = useMemo(() => {
     // Build a per-tx signed contribution iterator. Sign convention:
     //   buy / expense: contributors put money in (positive = money in)
-    //   sell:          contributors took proceeds out (positive = money out)
+    //   sell / payout: contributors took money out (positive in storage,
+    //                  negated here so equity reduces their net contribution)
     //   transfer:      contributions are already signed (positive = sender, negative = receiver)
     const signedContribsOf = (tx) => {
       const list = Array.isArray(tx.contributions) ? tx.contributions : [];
       return list.flatMap(c => {
         const amt = Number(c.amount) || 0;
         if (!c.name || amt === 0) return [];
-        if (tx.type === 'sell') return [{ name: c.name.trim(), amount: -Math.abs(amt) }];
+        if (tx.type === 'sell' || tx.type === 'payout') return [{ name: c.name.trim(), amount: -Math.abs(amt) }];
         if (tx.type === 'transfer') return [{ name: c.name.trim(), amount: amt }];
         // buy / expense (and anything else): positive amount means money in.
         return [{ name: c.name.trim(), amount: amt }];
@@ -2470,6 +2471,113 @@ function ExpenseModal({ members = [], collection, card = null, entry = null, onC
 }
 
 // ============================================================================
+// PayoutModal: pool-level cash distribution to one or more members. Stores
+// recipient amounts as POSITIVE in contributions[] (intuitive UX: "Alice gets
+// $50"), and the equity calc treats `type: 'payout'` like `sell` — negating
+// the amounts so each recipient's net contribution drops accordingly.
+function PayoutModal({ members = [], collection, onClose, onSave }) {
+  const [description, setDescription] = useState('');
+  const [amount, setAmount] = useState('');
+  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
+  const [contributions, setContributions] = useState([{ name: members[0] || '', amount: '' }]);
+  const [notes, setNotes] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  const addRow = () => setContributions([...contributions, { name: '', amount: '' }]);
+  const updateRow = (i, patch) => setContributions(contributions.map((c, idx) => idx === i ? { ...c, ...patch } : c));
+  const removeRow = (i) => setContributions(contributions.filter((_, idx) => idx !== i));
+
+  const amt = Number(amount) || 0;
+  const splitTotal = contributions.reduce((s, c) => s + (Number(c.amount) || 0), 0);
+  const splitMismatch = contributions.length > 0 && Math.abs(splitTotal - amt) > 0.01;
+  const anyRecipient = contributions.some(c => c.name.trim() && Number(c.amount) > 0);
+  const valid = amt > 0 && anyRecipient && !splitMismatch;
+
+  const handleSave = async () => {
+    setSaving(true);
+    await onSave({
+      collection_id: collection?.id || null,
+      card_id: null,
+      card_display_name: description.trim() || 'Payout',
+      type: 'payout',
+      amount: amt,
+      contributions: contributions
+        .filter(c => c.name.trim() && Number(c.amount) > 0)
+        .map(c => ({ name: c.name.trim(), amount: Number(c.amount) })),
+      occurred_at: date || null,
+      notes: notes.trim(),
+    });
+    setSaving(false);
+  };
+
+  return (
+    <div className="op-modal-backdrop" onClick={onClose}>
+      <div className="op-modal" onClick={(e) => e.stopPropagation()}>
+        <button className="op-modal-close" onClick={onClose}><X size={18} /></button>
+        <div className="op-modal-header">
+          <div>
+            <div className="op-eyebrow">Logging payout</div>
+            <div className="op-modal-title">Pool payout</div>
+            <div className="op-modal-sub">{collection?.name || 'Unscoped'} · cash distributed out of the pool to members</div>
+          </div>
+        </div>
+
+        <div className="op-form">
+          <div className="op-form-row">
+            <Field label="Description (optional)">
+              <input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="e.g. Q4 profit distribution" autoFocus />
+            </Field>
+            <Field label="Date">
+              <input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+            </Field>
+          </div>
+          <Field label="Total (USD)">
+            <input type="number" step="0.01" placeholder="0.00" value={amount} onChange={(e) => setAmount(e.target.value)} />
+          </Field>
+
+          <div className="op-form-section">
+            <div className="op-form-section-head">
+              <div>
+                <div className="op-form-section-title">Who received</div>
+                <div className="op-form-section-sub">Split the total among recipients. Each amount reduces that member's equity.</div>
+              </div>
+              <button className="op-btn-ghost" onClick={addRow}>
+                <Plus size={14} /> Add recipient
+              </button>
+            </div>
+            {contributions.map((c, i) => (
+              <ContribRow
+                key={i}
+                value={c}
+                members={members}
+                onChange={(patch) => updateRow(i, patch)}
+                onRemove={() => removeRow(i)}
+              />
+            ))}
+            {contributions.length > 0 && (
+              <div className={`op-contrib-check ${splitMismatch ? 'is-warn' : 'is-ok'}`}>
+                Splits total: <strong>${splitTotal.toFixed(2)}</strong> of <strong>${amt.toFixed(2)}</strong>
+                {splitMismatch && <span> · doesn't match payout total</span>}
+              </div>
+            )}
+          </div>
+
+          <Field label="Notes (optional)">
+            <textarea rows={2} value={notes} onChange={(e) => setNotes(e.target.value)} />
+          </Field>
+          <div className="op-form-actions">
+            <button className="op-btn-ghost" onClick={onClose} disabled={saving}>Cancel</button>
+            <button className="op-btn-primary" onClick={handleSave} disabled={saving || !valid}>
+              {saving ? 'Saving…' : 'Record payout'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================================
 // BulkGradingModal: select N entries, give each a grading cost, and split the
 // total among payers. Saves one expense tx per card, with payer shares scaled
 // proportionally so per-card contribs sum to the per-card cost.
@@ -2714,7 +2822,7 @@ function TransactionsView({ transactions, collections, entries = [], catalogInde
   useEffect(() => {
     if (activeCollectionId) setCollectionFilter(activeCollectionId);
   }, [activeCollectionId]);
-  const [modal, setModal] = useState(null); // 'transfer' | 'expense' | 'bulkgrade' | null
+  const [modal, setModal] = useState(null); // 'transfer' | 'expense' | 'payout' | 'bulkgrade' | null
 
   const collectionsById = useMemo(() => {
     const m = new Map();
@@ -2759,13 +2867,14 @@ function TransactionsView({ transactions, collections, entries = [], catalogInde
   }, [transactions, typeFilter, collectionFilter]);
 
   const totals = useMemo(() => {
-    let bought = 0, sold = 0, expenses = 0;
+    let bought = 0, sold = 0, expenses = 0, payouts = 0;
     for (const t of filtered) {
       if (t.type === 'buy') bought += Number(t.amount) || 0;
       if (t.type === 'sell') sold += Number(t.amount) || 0;
       if (t.type === 'expense') expenses += Number(t.amount) || 0;
+      if (t.type === 'payout') payouts += Number(t.amount) || 0;
     }
-    return { bought, sold, expenses, net: sold - bought - expenses };
+    return { bought, sold, expenses, payouts, net: sold - bought - expenses - payouts };
   }, [filtered]);
 
   // For 'All collections' filter we synthesize a collection so the equity
@@ -2795,6 +2904,7 @@ function TransactionsView({ transactions, collections, entries = [], catalogInde
         <Stat label="Bought" value={`$${totals.bought.toFixed(2)}`} />
         <Stat label="Sold" value={`$${totals.sold.toFixed(2)}`} accent />
         <Stat label="Expenses" value={`$${totals.expenses.toFixed(2)}`} />
+        <Stat label="Payouts" value={`$${totals.payouts.toFixed(2)}`} />
         <Stat
           label="Net cash flow"
           value={`${totals.net >= 0 ? '+' : ''}$${totals.net.toFixed(2)}`}
@@ -2819,6 +2929,7 @@ function TransactionsView({ transactions, collections, entries = [], catalogInde
           { v: 'sell', l: 'Sells' },
           { v: 'transfer', l: 'Transfers' },
           { v: 'expense', l: 'Expenses' },
+          { v: 'payout', l: 'Payouts' },
         ]} />
         <FilterGroup label="Collection" value={collectionFilter} onChange={setCollectionFilter} mode="select" options={[
           { v: 'all', l: 'All collections' },
@@ -2830,6 +2941,7 @@ function TransactionsView({ transactions, collections, entries = [], catalogInde
           <div className="op-filter-pills">
             <button className="op-filter-pill" onClick={() => setModal('transfer')}>+ Transfer</button>
             <button className="op-filter-pill" onClick={() => setModal('expense')}>+ Expense</button>
+            <button className="op-filter-pill" onClick={() => setModal('payout')}>+ Payout</button>
             <button className="op-filter-pill" onClick={() => setModal('bulkgrade')}>+ Bulk grade</button>
           </div>
         </div>
@@ -2851,6 +2963,18 @@ function TransactionsView({ transactions, collections, entries = [], catalogInde
       )}
       {modal === 'expense' && (
         <ExpenseModal
+          members={equityMembers}
+          collection={equityCollection}
+          onClose={() => setModal(null)}
+          onSave={async (payload) => {
+            const normalized = { ...payload, collection_id: payload.collection_id === 'all' ? null : payload.collection_id };
+            await onLogTransaction(normalized);
+            setModal(null);
+          }}
+        />
+      )}
+      {modal === 'payout' && (
+        <PayoutModal
           members={equityMembers}
           collection={equityCollection}
           onClose={() => setModal(null)}
@@ -2891,6 +3015,7 @@ function TransactionsView({ transactions, collections, entries = [], catalogInde
               onDelete={() => {
                 const label = t.type === 'transfer' ? 'transfer'
                   : t.type === 'expense' ? 'expense'
+                  : t.type === 'payout' ? 'payout'
                   : t.type === 'buy' ? 'buy log (the card stays in your collection)'
                   : t.type === 'sell' ? 'sell log' : 'transaction';
                 if (confirm(`Delete this ${label}? Equity recalculates immediately.`)) {
@@ -2913,6 +3038,7 @@ function TransactionRow({ tx, collection, onDelete }) {
     sell:     { label: 'SELL',     cls: 'is-sell',     tone: 'is-pos', sign: '+' },
     transfer: { label: 'TRANSFER', cls: 'is-transfer', tone: '',       sign: '' },
     expense:  { label: 'EXPENSE',  cls: 'is-expense',  tone: 'is-neg', sign: '−' },
+    payout:   { label: 'PAYOUT',   cls: 'is-expense',  tone: 'is-neg', sign: '−' },
   }[tx.type] || { label: (tx.type || '').toUpperCase(), cls: '', tone: '', sign: '' };
 
   return (
@@ -3114,14 +3240,18 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
       // actually this card" is the useful test). Skip auto if we've already
       // resolved to a different product (respect the manual pick).
       const confident = confidentMatchForCard(currentCard, matches);
-      if (confident && (!saved || saved.tcg_id === confident.tcg_id)) {
+      // Only auto-save when the user is clearly working a resolve queue. In
+      // "All cards" or "In my collection" they're browsing/searching, and a
+      // silent auto-resolve there is surprising — load candidates and wait
+      // for an explicit Save. "Reported" is also hands-off: the user flagged
+      // those for personal review.
+      const autoResolveAllowed = filterMode === 'unresolved' || filterMode === 'issues';
+      if (autoResolveAllowed && confident && (!saved || saved.tcg_id === confident.tcg_id)) {
         saveResolution(currentCid, confident);
         if (currentReport) clearMatchReport(currentCid);
         setResolveRev(r => r + 1);
         // In removal queues the card drops out and the next one shifts into
-        // this index — don't advance. Elsewhere, step forward.
-        const removal = filterMode === 'unresolved' || filterMode === 'issues' || filterMode === 'reported';
-        if (!removal) setIndex(i => i + 1);
+        // this index — don't advance.
         return;
       }
       const chosen = (saved && matches.find(v => v.tcg_id === saved.tcg_id))
