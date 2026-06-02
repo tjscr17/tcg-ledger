@@ -114,27 +114,39 @@ const tokenize = (s) => (s || '')
   .filter(t => t.length > 1 && !STOPWORDS.has(t));
 
 // True if every significant subject token appears in the card name's tokens.
-// Catches "Monkey D. Luffy" matching "Monkey D. Luffy (Manga Art)" and
-// "ZORO" matching "Roronoa Zoro" but not random partial overlaps.
-const nameMatchesSubject = (cardName, subject) => {
+// Catches "Monkey D. Luffy" matching "Monkey D. Luffy (Manga Rare)" and
+// "ZORO" matching "Roronoa Zoro" but not random partial overlaps. Tries the
+// cleaned game-style name first; falls back to the sales-formatted full name
+// (which has the "(Parallel)/(Manga Rare)/(Alternate Art)" suffixes) so a
+// PSA subject like "MONKEY D. LUFFY ALTERNATE ART" still hits.
+const nameMatchesSubject = (cardName, subject, fullName) => {
   const subjTokens = tokenize(subject);
   if (subjTokens.length === 0) return false;
   const nameTokens = new Set(tokenize(cardName));
-  return subjTokens.every(t => nameTokens.has(t));
+  if (subjTokens.every(t => nameTokens.has(t))) return true;
+  if (fullName && fullName !== cardName) {
+    const fullTokens = new Set(tokenize(fullName));
+    return subjTokens.every(t => fullTokens.has(t));
+  }
+  return false;
 };
 
 const CANDIDATE_CAP = 25;
 
 // Returns true if a catalog card belongs to one of the PSA-derived setIds.
-// Checks card.setId (normalized: "OP-12" → "OP12") AND card.originalSetId
-// (for promos that we bucket under setId="PROMO" but originally came from
-// e.g. OP-09). Promos in setId="PROMO" match against the special PROMO key.
+// Normalizes by stripping non-alphanumeric so TCGPlayer abbreviations like
+// "OP14", "OP14 RE", "ST-29" all reduce to comparable tokens ("OP14",
+// "OP14RE", "ST29"). A PSA "OP14" hits both the base OP14 group and the
+// OP14 RE release-event group, ranking the base print first (event-stamped
+// printings are usually a deliberate manual pick).
 const cardInAnySet = (card, setIds) => {
   if (setIds.size === 0) return false;
-  const setNorm = (card.setId || '').replace(/-/g, '').toUpperCase();
+  const setNorm = (card.setId || '').replace(/[^A-Z0-9]/gi, '').toUpperCase();
   if (setNorm && setIds.has(setNorm)) return true;
-  const origNorm = (card.originalSetId || '').replace(/-/g, '').toUpperCase();
-  if (origNorm && setIds.has(origNorm)) return true;
+  // Sub-token match: "OP14" should also hit setNorm "OP14RE", "OP14ANN", etc.
+  for (const wanted of setIds) {
+    if (setNorm.startsWith(wanted) && setNorm.length > wanted.length) return true;
+  }
   return false;
 };
 
@@ -151,21 +163,22 @@ const extractCertSetIds = (cert) => {
   return setIds;
 };
 
-// The PSA → OPTCG matcher.
+// The PSA → OPTCG matcher (TCGPlayer-sourced catalog).
 //
 // Algorithm (simple, in order):
-//   1. Brand → set    (extract OP11 / ST21 / EB02 / PROMO from the Brand text)
+//   1. Brand → set    (extract OP11 / ST21 / EB02 from the Brand text)
 //   2. CardNumber → trailing card number (last digits, zero-padded to 3)
 //   3. Look up cards in the catalog where (set, trailing-number) match.
+//      A PSA "OP14" hits both the OP14 group and OP14 RE / OP14 ANN
+//      sub-groups (release-event and tournament prize sets); the base
+//      group ranks first so the user gets the normal printing by default.
 //   4. If Subject is present and multiple cards remain, filter to those
 //      whose name matches the Subject (token-set match: PSA's "MONKEY D.
-//      LUFFY" ↔ catalog "Monkey D. Luffy").
-//   5. Sort: non-parallel base first, then by setId desc.
-//
-// Cards in a different printing set (cross-set reprints) are also matched —
-// `card.setId` and `card.originalSetId` are both checked against the
-// PSA-derived set, so an OP12 parallel printing of ST01-004 (with
-// displayId "ST01-004" but setId "OP-12") shows up under PSA's "OP12 / 004".
+//      LUFFY" ↔ catalog "Monkey D. Luffy"). Falls back to the sales-
+//      formatted fullName so "ALTERNATE ART" / "MANGA RARE" hints in
+//      Subject still hit.
+//   5. Sort: number-match first, then base printings (no attribute flags),
+//      then prefer the shorter (parent) set abbreviation, then by setId desc.
 //
 // Fallbacks (only when steps 1–4 yield nothing): subject-only across all
 // sets, then OPTCG-id extraction from any field, then any catalog card
@@ -190,7 +203,7 @@ export const findCandidateCards = (cert, catalog) => {
   // Step 4: subject-narrow when present and we got multiple hits. A single
   // hit doesn't need narrowing; zero hits drops to fallbacks below.
   if (matches.length > 1 && subj) {
-    const named = matches.filter(c => nameMatchesSubject(c.name, subj));
+    const named = matches.filter(c => nameMatchesSubject(c.name, subj, c.fullName));
     if (named.length > 0) matches = named;
   }
 
@@ -198,13 +211,13 @@ export const findCandidateCards = (cert, catalog) => {
   // but PSA's CardNumber didn't pin a printing (e.g. promos with
   // alphanumeric card numbers PSA records oddly).
   if (matches.length === 0 && setIds.size > 0 && subj) {
-    matches = catalog.filter(c => cardInAnySet(c, setIds) && nameMatchesSubject(c.name, subj));
+    matches = catalog.filter(c => cardInAnySet(c, setIds) && nameMatchesSubject(c.name, subj, c.fullName));
   }
 
   // Fallback B: subject-only across the whole catalog. Brand didn't yield
   // a recognizable set, but the subject is clean enough to hit cards by name.
   if (matches.length === 0 && subj) {
-    matches = catalog.filter(c => nameMatchesSubject(c.name, subj));
+    matches = catalog.filter(c => nameMatchesSubject(c.name, subj, c.fullName));
   }
 
   // Fallback C: extract any OPTCG-format id from PSA fields and look it up.
@@ -229,15 +242,26 @@ export const findCandidateCards = (cert, catalog) => {
   if (matches.length === 0) return [];
 
   // Rank: cards whose trailing number matches PSA's CardNumber come first,
-  // then non-parallel base before parallel/alt-art, then by setId desc so
-  // more recent printings rise.
+  // then base printings (no attribute flags) before any variant, then by
+  // setId desc so more recent printings rise. Tie-broken so a card whose
+  // setId equals the base PSA-derived set (e.g. "OP14") wins over one in
+  // a release-event sub-group ("OP14 RE") — the user can manually pick the
+  // event-stamped printing if that's actually what they have.
+  const baseSet = setIds.size === 1 ? [...setIds][0] : null;
+  const setLen = (s) => (s || '').replace(/[^A-Z0-9]/gi, '').length;
   matches.sort((a, b) => {
     const aNum = trailingMatchesNum(a) ? 0 : 1;
     const bNum = trailingMatchesNum(b) ? 0 : 1;
     if (aNum !== bNum) return aNum - bNum;
-    const ap = a.isParallel ? 1 : 0;
-    const bp = b.isParallel ? 1 : 0;
-    if (ap !== bp) return ap - bp;
+    const aAttrs = (a.attributes || []).length;
+    const bAttrs = (b.attributes || []).length;
+    if (aAttrs !== bAttrs) return aAttrs - bAttrs;
+    if (baseSet) {
+      // Prefer the shortest matching set token (the parent group) over its
+      // longer variants like "OP14RE", "OP14ANN".
+      const aLen = setLen(a.setId), bLen = setLen(b.setId);
+      if (aLen !== bLen) return aLen - bLen;
+    }
     return (b.setId || '').localeCompare(a.setId || '');
   });
 
