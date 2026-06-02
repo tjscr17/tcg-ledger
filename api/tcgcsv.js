@@ -38,6 +38,7 @@ let groupNameIndex = null;      // Map<groupId, name>
 let indexFetchedAt = 0;
 let indexPromise = null;
 const groupPricesCache = new Map();
+const groupPricesInFlight = new Map();
 
 const fetchJSON = async (url) => {
   const r = await fetch(url, { headers: { 'User-Agent': TCGCSV_USER_AGENT } });
@@ -84,6 +85,20 @@ const summarizeProduct = (p, groupId) => ({
   isManga: detectIsManga(p.name),
 });
 
+// Run an async fn across `items` with at most `concurrency` in flight at once.
+// Used to bound parallel TCGCSV fetches — polite to the maintainer while
+// staying well under Vercel's serverless function timeout.
+const parallelEach = async (items, concurrency, fn) => {
+  let next = 0;
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (next < items.length) {
+      const i = next++;
+      try { await fn(items[i], i); } catch (e) { /* per-item caught below */ }
+    }
+  });
+  await Promise.all(workers);
+};
+
 const ensureIndex = async () => {
   const fresh = productIndex && (Date.now() - indexFetchedAt < INDEX_TTL_MS);
   if (fresh) return productIndex;
@@ -94,10 +109,15 @@ const ensureIndex = async () => {
     const byNumber = new Map();
     const abbrIdx = new Map();
     const nameIdx = new Map();
-    // Sequential — TCGCSV is one-person-run; parallel hammering is rude.
-    for (const g of groups.results || []) {
+    const groupList = groups.results || [];
+    for (const g of groupList) {
       if (g.abbreviation) abbrIdx.set(g.groupId, g.abbreviation);
       if (g.name) nameIdx.set(g.groupId, g.name);
+    }
+    // Bounded-parallel group product fetches. Was sequential to be polite,
+    // but ~76 groups serial blew past Vercel's serverless timeout on cold
+    // start. Concurrency 8 is fast (~1–2 s total) and still light on TCGCSV.
+    await parallelEach(groupList, 8, async (g) => {
       try {
         const products = await fetchJSON(`${TCGCSV_BASE}/${OP_TCG_CATEGORY_ID}/${g.groupId}/products`);
         for (const p of products.results || []) {
@@ -113,7 +133,7 @@ const ensureIndex = async () => {
       } catch (e) {
         console.warn(`[tcgcsv] failed to load products for group ${g.groupId}`, e);
       }
-    }
+    });
     productIndex = byId;
     productsByNumber = byNumber;
     groupAbbrIndex = abbrIdx;
@@ -127,10 +147,19 @@ const ensureIndex = async () => {
 const getGroupPrices = async (groupId) => {
   const cached = groupPricesCache.get(groupId);
   if (cached && Date.now() - cached.fetchedAt < PRICES_TTL_MS) return cached.prices;
-  const data = await fetchJSON(`${TCGCSV_BASE}/${OP_TCG_CATEGORY_ID}/${groupId}/prices`);
-  const prices = data.results || [];
-  groupPricesCache.set(groupId, { prices, fetchedAt: Date.now() });
-  return prices;
+  // Dedup concurrent fetches: a bulk handler hitting many products in the
+  // same group would otherwise fire one prices request per product instead
+  // of sharing one.
+  const existing = groupPricesInFlight.get(groupId);
+  if (existing) return existing;
+  const promise = (async () => {
+    const data = await fetchJSON(`${TCGCSV_BASE}/${OP_TCG_CATEGORY_ID}/${groupId}/prices`);
+    const prices = data.results || [];
+    groupPricesCache.set(groupId, { prices, fetchedAt: Date.now() });
+    return prices;
+  })().finally(() => groupPricesInFlight.delete(groupId));
+  groupPricesInFlight.set(groupId, promise);
+  return promise;
 };
 
 const pickPriceRecord = (records, productId) => {
