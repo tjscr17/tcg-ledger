@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useRef, useCallback, useReducer } from 'react';
 import { Search, Plus, X, TrendingUp, TrendingDown, Folder, Trash2, DollarSign, Anchor, ChevronRight, Package, BarChart3, RefreshCw, Cloud, HardDrive, ImageOff, Award, Loader2, Pencil, Eye, EyeOff } from 'lucide-react';
-import { store, MODE, VAULT_LABEL } from './storage.js';
+import { store, MODE, VAULT_LABEL, getLastStoreError } from './storage.js';
 import { loadCatalog, groupBySet, compareSets, augmentWithErrata, hasPreErrata, togglePreErrata } from './catalog.js';
 import { hasPsaToken, fetchCert, findCandidateCards } from './psa.js';
 import { runCanonicalMigration, runPcCleanup, runTcgplayerMigration, runClearLegacyResolutions } from './migrate.js';
@@ -323,9 +323,13 @@ export default function App() {
       setEntries(prev => [...prev, created]);
       logTransaction({ type: 'buy', entry: created });
     } else {
-      // shared.insert returned null — Supabase rejected the row. Surface it
-      // so the user notices instead of silently swallowing the failure.
-      alert("Couldn't save the entry. Check the console for the Supabase error — most likely a missing column. See storage.js for the migration SQL.");
+      // shared.insert returned null — Supabase rejected the row. Surface the
+      // actual error so the user knows exactly what column is missing.
+      const err = getLastStoreError();
+      const detail = err
+        ? `${err.code || ''} ${err.message || ''}${err.details ? ` · ${err.details}` : ''}${err.hint ? ` · hint: ${err.hint}` : ''}`.trim()
+        : '';
+      alert(`Couldn't save the entry to Supabase.${detail ? `\n\n${detail}` : ''}\n\nMost common cause: a missing column on the entries table. The migration SQL is documented at the top of src/storage.js.`);
     }
   };
 

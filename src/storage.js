@@ -23,6 +23,13 @@ const supa = isShared ? createClient(SUPA_URL, SUPA_KEY) : null;
 
 export const MODE = isShared ? 'shared' : 'solo';
 
+// Last failing storage call's error details (Supabase code/message/details/hint
+// plus table). Exposed so UI handlers can surface a specific message — e.g.
+// "column foo doesn't exist" — instead of pointing the user at the console.
+let lastStoreError = null;
+export const getLastStoreError = () => lastStoreError;
+export const clearLastStoreError = () => { lastStoreError = null; };
+
 // ----- Solo (localStorage) -----
 const lsKey = (table) => `optcg:${VAULT_KEY}:${table}`;
 
@@ -203,7 +210,14 @@ const shared = {
     const payload = { ...row, vault_key: VAULT_KEY };
     delete payload.id;
     const { data, error } = await supa.from(table).insert(payload).select().single();
-    if (error) { console.error(error); return null; }
+    if (error) {
+      console.error('[storage] insert failed', { table, error });
+      // Hang the error off the returned null so callers can show the user
+      // a specific message ("column X not found" etc.) instead of pointing
+      // them at the console.
+      lastStoreError = { code: error.code, message: error.message, table, details: error.details, hint: error.hint };
+      return null;
+    }
     return data;
   },
   async update(table, id, patch) {
