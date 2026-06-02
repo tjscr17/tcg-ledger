@@ -280,12 +280,10 @@ const revalidateCatalog = async () => {
   return catalogPromise;
 };
 
-// ---------------------------------------------------------------------------
-// Price history — OPTCGAPI's `/twoweeks/` endpoint is gone with the source
-// switch. Stubbed to return `[]` so the detail drawer's trend widget shows a
-// neutral "—". Could be replaced with a self-tracked snapshot table later.
-// ---------------------------------------------------------------------------
-export const loadPriceHistory = async () => [];
+// Price history was OPTCGAPI's `/twoweeks/` endpoint, now gone with the
+// source switch. The detail drawer dropped the 14-day trend widget that
+// consumed it. If a self-tracked snapshot table appears later, re-introduce
+// loadPriceHistory here.
 
 // ---------------------------------------------------------------------------
 // Pre-errata twins. A user marks a card as having a pre-errata printing; the

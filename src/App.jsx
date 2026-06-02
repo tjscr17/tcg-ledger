@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useRef, useCallback, useReducer } from 'react';
 import { Search, Plus, X, TrendingUp, TrendingDown, Folder, Trash2, DollarSign, Anchor, ChevronRight, Package, BarChart3, RefreshCw, Cloud, HardDrive, ImageOff, Award, Loader2, Pencil, Eye, EyeOff } from 'lucide-react';
 import { store, MODE, VAULT_LABEL } from './storage.js';
-import { loadCatalog, loadPriceHistory, groupBySet, compareSets, augmentWithErrata, hasPreErrata, togglePreErrata } from './catalog.js';
+import { loadCatalog, groupBySet, compareSets, augmentWithErrata, hasPreErrata, togglePreErrata } from './catalog.js';
 import { hasPsaToken, fetchCert, findCandidateCards } from './psa.js';
 import { runCanonicalMigration, runPcCleanup, runTcgplayerMigration } from './migrate.js';
 import {
@@ -684,7 +684,7 @@ function Header({ view, setView, collections, activeCollectionId, setActiveColle
           <Eye size={15} /> Watch
         </button>
         <button className={`op-nav-btn ${view === 'resolve' ? 'is-active' : ''}`} onClick={() => setView('resolve')}>
-          <RefreshCw size={15} /> Resolve
+          <Package size={15} /> Catalog
         </button>
       </nav>
 
@@ -1462,60 +1462,27 @@ function SearchView({ catalog, watchlist = [], variantRev = 0, onAddCard, onCard
   const watchedIds = useMemo(() => new Set(watchlist.map(w => w.card_id)), [watchlist]);
   const [q, setQ] = useStoredState('optcg:search:q', '');
   const [setFilter, setSetFilter] = useStoredState('optcg:search:setFilter', 'all');
-  const [filterDim, setFilterDim] = useStoredState('optcg:search:filterDim', 'none'); // 'none' | 'rarity' | 'color'
-  const [filterValue, setFilterValue] = useStoredState('optcg:search:filterValue', 'all');
+  // Post-TCGPlayer-source switch (2026-06-01): refine/hide by Color and Type
+  // are gone — TCGPlayer doesn't expose color/cost/type/power/text, so those
+  // facets have no data to filter on. Only Rarity (extendedData.Rarity)
+  // survives.
+  const [filterValue, setFilterValue] = useStoredState('optcg:search:filterValue', 'all'); // rarity value, or 'all'
   const [sortBy, setSortBy] = useStoredState('optcg:search:sortBy', 'set'); // 'set' | 'name' | 'price-desc' | 'price-asc'
-  // Stage 4 removed the "Price as" tier toggle (raw only). Stage 5 will
-  // garbage-collect the persisted localStorage value.
-  // Hide filter: per-dimension Sets so multiple hides apply at once. `hideDim`
-  // controls which dimension's pills are visible — the other dimensions stay
-  // active in the background.
-  const [hideDim, setHideDim] = useStoredState('optcg:search:hideDim', 'none'); // 'none' | 'rarity' | 'color' | 'type'
-  const [hiddenByDim, setHiddenByDim] = useStoredState(
-    'optcg:search:hiddenByDim',
-    () => ({ rarity: new Set(), color: new Set(), type: new Set() }),
-    {
-      serialize: (v) => JSON.stringify({ rarity: [...v.rarity], color: [...v.color], type: [...v.type] }),
-      deserialize: (s) => {
-        const o = JSON.parse(s);
-        return { rarity: new Set(o.rarity || []), color: new Set(o.color || []), type: new Set(o.type || []) };
-      },
-    }
+  const [hiddenRarities, setHiddenRarities] = useStoredState(
+    'optcg:search:hiddenRarities',
+    () => new Set(),
+    { serialize: (v) => JSON.stringify([...v]), deserialize: (s) => new Set(JSON.parse(s) || []) }
   );
+  const [showHideRow, setShowHideRow] = useStoredState('optcg:search:showHideRow', false);
 
-  const currentHidden = hideDim !== 'none' ? hiddenByDim[hideDim] : null;
-  const totalHidden = hiddenByDim.rarity.size + hiddenByDim.color.size + hiddenByDim.type.size;
-
-  const toggleHiddenValue = (val) => {
-    if (hideDim === 'none') return;
-    setHiddenByDim(prev => {
-      const next = new Set(prev[hideDim]);
+  const toggleHiddenRarity = (val) => {
+    setHiddenRarities(prev => {
+      const next = new Set(prev);
       if (next.has(val)) next.delete(val); else next.add(val);
-      return { ...prev, [hideDim]: next };
+      return next;
     });
   };
-  const clearCurrentDim = () => {
-    if (hideDim === 'none') return;
-    setHiddenByDim(prev => ({ ...prev, [hideDim]: new Set() }));
-  };
-  const clearAllHides = () => setHiddenByDim({ rarity: new Set(), color: new Set(), type: new Set() });
-
-  // Pills for the active hide dimension. Rarity & color are fixed lists; type
-  // is derived from the catalog so we cover every card_type the API returns.
-  const hideValueOptions = useMemo(() => {
-    if (hideDim === 'rarity') {
-      return ['L','SR','SEC','R','UC','C','P','SP','TR'].map(v => ({ v, l: RARITY_LABELS[v] || v }));
-    }
-    if (hideDim === 'color') {
-      return ['Red','Blue','Green','Yellow','Purple','Black','Multicolor'].map(v => ({ v, l: v }));
-    }
-    if (hideDim === 'type') {
-      const seen = new Set();
-      for (const c of catalog) if (c.type) seen.add(c.type);
-      return [...seen].sort().map(v => ({ v, l: v }));
-    }
-    return [];
-  }, [hideDim, catalog]);
+  const clearHiddenRarities = () => setHiddenRarities(new Set());
 
   // All distinct sets, sorted
   const sets = useMemo(() => {
@@ -1529,48 +1496,25 @@ function SearchView({ catalog, watchlist = [], variantRev = 0, onAddCard, onCard
 
   const filtered = useMemo(() => {
     const needle = q.trim().toLowerCase();
-    const fieldByDim = { rarity: 'rarity', color: 'color' };
-    const activeField = fieldByDim[filterDim];
     return catalog.filter(c => {
-      if (hiddenByDim.rarity.has(c.rarity)) return false;
-      if (hiddenByDim.color.has(c.color)) return false;
-      if (hiddenByDim.type.has(c.type)) return false;
+      if (hiddenRarities.has(c.rarity)) return false;
       if (setFilter !== 'all' && c.setId !== setFilter) return false;
-      if (activeField && filterValue !== 'all' && c[activeField] !== filterValue) return false;
+      if (filterValue !== 'all' && c.rarity !== filterValue) return false;
       if (!needle) return true;
       return (c.name || '').toLowerCase().includes(needle) ||
         (c.fullName || '').toLowerCase().includes(needle) ||
-        (c.variant || '').toLowerCase().includes(needle) ||
         (c.id || '').toLowerCase().includes(needle) ||
         (c.displayId || '').toLowerCase().includes(needle) ||
-        (c.setName || '').toLowerCase().includes(needle) ||
-        (c.text || '').toLowerCase().includes(needle);
+        (c.setName || '').toLowerCase().includes(needle);
     });
-  }, [catalog, q, setFilter, filterDim, filterValue, hiddenByDim]);
+  }, [catalog, q, setFilter, filterValue, hiddenRarities]);
 
-  // Values for the secondary cascade dropdown.
-  const filterValueOptions = useMemo(() => {
-    if (filterDim === 'rarity') {
-      return [
-        { v: 'all', l: 'All rarities' }, { v: 'L', l: 'Leader' }, { v: 'SR', l: 'Super Rare' },
-        { v: 'SEC', l: 'Secret' }, { v: 'R', l: 'Rare' }, { v: 'UC', l: 'Uncommon' },
-        { v: 'C', l: 'Common' }, { v: 'P', l: 'Promo' },
-      ];
-    }
-    if (filterDim === 'color') {
-      return [
-        { v: 'all', l: 'All colors' }, { v: 'Red', l: 'Red' }, { v: 'Blue', l: 'Blue' },
-        { v: 'Green', l: 'Green' }, { v: 'Yellow', l: 'Yellow' },
-        { v: 'Purple', l: 'Purple' }, { v: 'Black', l: 'Black' },
-      ];
-    }
-    return [];
-  }, [filterDim]);
-
-  const changeFilterDim = (dim) => {
-    setFilterDim(dim);
-    setFilterValue('all');
-  };
+  // Distinct rarity values present in the catalog, for the rarity dropdown.
+  const rarityOptions = useMemo(() => {
+    const seen = new Set();
+    for (const c of catalog) if (c.rarity) seen.add(c.rarity);
+    return [{ v: 'all', l: 'All rarities' }, ...[...seen].sort().map(v => ({ v, l: RARITY_LABELS[v] || v }))];
+  }, [catalog]);
 
   const sorted = useMemo(() => {
     const arr = [...filtered];
@@ -1595,7 +1539,7 @@ function SearchView({ catalog, watchlist = [], variantRev = 0, onAddCard, onCard
         <div>
           <div className="op-eyebrow">Catalog</div>
           <h1 className="op-page-title">Card Search</h1>
-          <div className="op-page-sub">{catalog.length.toLocaleString()} cards indexed · live prices from OPTCGAPI</div>
+          <div className="op-page-sub">{catalog.length.toLocaleString()} cards indexed · live prices via TCGPlayer (TCGCSV)</div>
         </div>
       </div>
 
@@ -1621,21 +1565,7 @@ function SearchView({ catalog, watchlist = [], variantRev = 0, onAddCard, onCard
           ...sets.map(s => ({ v: s.id, l: `${s.id} · ${s.name}` })),
         ]} />
 
-        <FilterGroup label="Refine by" value={filterDim} onChange={changeFilterDim} mode="select" options={[
-          { v: 'none', l: 'No refinement' },
-          { v: 'rarity', l: 'Rarity' },
-          { v: 'color', l: 'Color' },
-        ]} />
-
-        {filterDim !== 'none' && (
-          <FilterGroup
-            label={filterDim === 'rarity' ? 'Rarity' : 'Color'}
-            value={filterValue}
-            onChange={setFilterValue}
-            mode="select"
-            options={filterValueOptions}
-          />
-        )}
+        <FilterGroup label="Rarity" value={filterValue} onChange={setFilterValue} mode="select" options={rarityOptions} />
 
         <FilterGroup label="Sort" value={sortBy} onChange={setSortBy} options={[
           { v: 'set', l: 'By Set' },
@@ -1644,42 +1574,39 @@ function SearchView({ catalog, watchlist = [], variantRev = 0, onAddCard, onCard
           { v: 'price-asc', l: 'Price ↑' },
         ]} />
 
-        <FilterGroup label={`Hide by${totalHidden > 0 ? ` (${totalHidden})` : ''}`} value={hideDim} onChange={setHideDim} mode="select" options={[
-          { v: 'none', l: 'Nothing hidden' },
-          { v: 'rarity', l: `Rarity${hiddenByDim.rarity.size > 0 ? ` · ${hiddenByDim.rarity.size}` : ''}` },
-          { v: 'color', l: `Color${hiddenByDim.color.size > 0 ? ` · ${hiddenByDim.color.size}` : ''}` },
-          { v: 'type', l: `Card type${hiddenByDim.type.size > 0 ? ` · ${hiddenByDim.type.size}` : ''}` },
-        ]} />
-
-        {hideDim !== 'none' && (
-          <div className="op-filter-group">
-            <div className="op-filter-label">
-              {`Hide ${hideDim}${currentHidden && currentHidden.size > 0 ? ` (${currentHidden.size})` : ''}`}
-              {currentHidden && currentHidden.size > 0 && (
-                <button className="op-clear-filters" style={{ marginLeft: 8 }} onClick={clearCurrentDim}>clear</button>
-              )}
-            </div>
+        <div className="op-filter-group">
+          <div className="op-filter-label">
+            Hide rarities{hiddenRarities.size > 0 ? ` (${hiddenRarities.size})` : ''}
+            {' '}
+            <button className="op-clear-filters" onClick={() => setShowHideRow(!showHideRow)}>
+              {showHideRow ? 'collapse' : 'expand'}
+            </button>
+            {hiddenRarities.size > 0 && (
+              <button className="op-clear-filters" style={{ marginLeft: 8 }} onClick={clearHiddenRarities}>clear</button>
+            )}
+          </div>
+          {showHideRow && (
             <div className="op-filter-pills">
-              {hideValueOptions.map(o => (
+              {rarityOptions.filter(o => o.v !== 'all').map(o => (
                 <button
                   key={o.v}
-                  className={`op-filter-pill is-compact ${currentHidden && currentHidden.has(o.v) ? 'is-active' : ''}`}
-                  onClick={() => toggleHiddenValue(o.v)}
+                  className={`op-filter-pill is-compact ${hiddenRarities.has(o.v) ? 'is-active' : ''}`}
+                  onClick={() => toggleHiddenRarity(o.v)}
                   title={`Hide ${o.l}`}
                 >
                   {o.l}
                 </button>
               ))}
             </div>
-          </div>
-        )}
+          )}
+        </div>
       </div>
 
       <div className="op-results-count">
         {sorted.length.toLocaleString()} {sorted.length === 1 ? 'result' : 'results'}
-        {(q || setFilter !== 'all' || totalHidden > 0 || (filterDim !== 'none' && filterValue !== 'all')) && (
+        {(q || setFilter !== 'all' || hiddenRarities.size > 0 || filterValue !== 'all') && (
           <button className="op-clear-filters" onClick={() => {
-            setQ(''); setSetFilter('all'); setFilterDim('none'); setFilterValue('all'); setHideDim('none'); clearAllHides();
+            setQ(''); setSetFilter('all'); setFilterValue('all'); clearHiddenRarities();
           }}>Clear filters</button>
         )}
       </div>
@@ -3229,8 +3156,13 @@ function VariantsModal({ onClose }) {
 }
 
 // ============================================================================
+// ResolveView — post-TCGPlayer-switch this is more "Catalog browser" than
+// "resolve unresolved cards" (every card has a built-in tcg_id at catalog
+// build time). The Unresolved + Issues queues are kept but mostly empty;
+// the page's real purpose is now browsing, picking overrides when needed,
+// surfacing reports, and managing printing-attribute variants.
 function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
-  const [filterMode, setFilterMode] = useState('unresolved'); // 'unresolved' | 'in-collection' | 'issues' | 'reported' | 'all'
+  const [filterMode, setFilterMode] = useState('all'); // 'unresolved' | 'in-collection' | 'issues' | 'reported' | 'all'
   const [search, setSearch] = useState('');
   const [showVariants, setShowVariants] = useState(false);
   // In these queues, resolving a card makes it no longer qualify, so it
@@ -3239,12 +3171,6 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
   // ('all' / 'in-collection' keep resolved cards, so we do advance there.)
   const [index, setIndex] = useState(0);
 
-  // Bulk prefetch state
-  const [prefetching, setPrefetching] = useState(false);
-  const [prefetchDone, setPrefetchDone] = useState(0);
-  const [prefetchTotal, setPrefetchTotal] = useState(0);
-  const [prefetchFailed, setPrefetchFailed] = useState(0);
-  const abortRef = useRef(false);
   // Bump on a resolution save so the "unresolved" queue + currentCard state
   // re-derive after the user picks something.
   const [resolveRev, setResolveRev] = useState(0);
@@ -3332,46 +3258,6 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [catalog, entries, filterMode, resolveRev, search]);
 
-  const runPrefetch = async () => {
-    if (prefetching) return;
-    const targets = catalog.filter(c => !isResolved(c));
-    if (targets.length === 0) { alert('Everything is already resolved.'); return; }
-    if (!confirm(`Auto-resolve ${targets.length.toLocaleString()} unresolved card${targets.length === 1 ? '' : 's'} via TCGCSV? Picks the TCGPlayer printing whose set matches the card's source set AND whose printing variants (parallel, manga, custom) line up. You can override any choice manually afterwards.`)) return;
-    abortRef.current = false;
-    setPrefetching(true);
-    setPrefetchTotal(targets.length);
-    setPrefetchDone(0);
-    setPrefetchFailed(0);
-
-    // Concurrency-2 — TCGCSV's maintainer asks for polite traffic; cards
-    // share a group's price endpoint so duplicates of the same group
-    // benefit from the proxy's per-group cache.
-    const concurrency = 2;
-    let idx = 0;
-    const worker = async () => {
-      while (idx < targets.length) {
-        if (abortRef.current) return;
-        const card = targets[idx++];
-        try {
-          const number = cardNumberFromCanonical(cidOf(card)) || card.displayId;
-          const products = await searchTcgProducts(number);
-          // Score-based: prefers products whose group_abbreviation matches
-          // the card's source set AND whose parallel flag matches. Falls
-          // through to non-parallel/has-a-price tiebreakers.
-          const pick = pickBestMatchForCard(card, products);
-          if (pick) saveResolution(cidOf(card), pick);
-          else setPrefetchFailed(f => f + 1);
-        } catch {
-          setPrefetchFailed(f => f + 1);
-        }
-        setPrefetchDone(d => d + 1);
-      }
-    };
-    await Promise.all(Array.from({ length: concurrency }, worker));
-    setPrefetching(false);
-    setResolveRev(r => r + 1);
-  };
-  const cancelPrefetch = () => { abortRef.current = true; };
 
   const currentCard = queue[index];
   const currentCid = currentCard ? cidOf(currentCard) : '';
@@ -3489,9 +3375,13 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
     <div className="op-view">
       <div className="op-page-head">
         <div>
-          <div className="op-eyebrow">Catalog cleanup</div>
-          <h1 className="op-page-title">Resolve cards</h1>
-          <div className="op-page-sub">Pick the correct TCGPlayer printing for each card. Saves wire up the raw market price (TCGCSV) and TCGPlayer art.</div>
+          <div className="op-eyebrow">Catalog browser</div>
+          <h1 className="op-page-title">Catalog</h1>
+          <div className="op-page-sub">
+            Browse every TCGPlayer printing, override the picked printing on
+            any card, manage variant-detection rules, and review cards you've
+            flagged.
+          </div>
           {getHydratedResolutionCount() >= 0 && (
             <div className="op-page-sub" style={{ marginTop: 4 }}>
               ☁ {getHydratedResolutionCount().toLocaleString()} resolutions loaded from cloud
@@ -3501,19 +3391,16 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
       </div>
 
       <div className="op-stats">
-        <Stat label="Resolved" value={counts.resolved.toLocaleString()} accent />
-        <Stat label="Unresolved" value={counts.unresolved.toLocaleString()} />
-        <Stat label="Issues" value={counts.issues.toLocaleString()} sub="set or parallel mismatch" tone={counts.issues > 0 ? 'neg' : null} />
+        <Stat label="Cards" value={counts.total.toLocaleString()} accent />
+        <Stat label="In my collection" value={entries.length.toLocaleString()} sub="entries" />
         <Stat label="Reported" value={counts.reported.toLocaleString()} sub="flagged by you for review" tone={counts.reported > 0 ? 'neg' : null} />
       </div>
 
       <div className="op-filters">
-        <FilterGroup label="Queue" value={filterMode} onChange={setFilterMode} mode="select" options={[
-          { v: 'unresolved', l: `Unresolved (${counts.unresolved.toLocaleString()})` },
-          { v: 'in-collection', l: 'Cards in my collections' },
-          { v: 'issues', l: `Issues — set/parallel mismatch (${counts.issues.toLocaleString()})` },
-          { v: 'reported', l: `Reported by me (${counts.reported.toLocaleString()})` },
+        <FilterGroup label="View" value={filterMode} onChange={setFilterMode} mode="select" options={[
           { v: 'all', l: `All cards (${counts.total.toLocaleString()})` },
+          { v: 'in-collection', l: 'Cards in my collections' },
+          { v: 'reported', l: `Reported by me (${counts.reported.toLocaleString()})` },
         ]} />
 
         <div className="op-filter-group" style={{ flex: 1, minWidth: 200 }}>
@@ -3528,19 +3415,6 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
         </div>
 
         <div className="op-filter-group">
-          <div className="op-filter-label">Bulk</div>
-          {!prefetching ? (
-            <button className="op-btn-ghost" onClick={runPrefetch} title="Auto-resolve every unresolved card via TCGCSV (set + parallel aware)">
-              <RefreshCw size={14} /> Auto-resolve all
-            </button>
-          ) : (
-            <button className="op-btn-ghost" onClick={cancelPrefetch}>
-              <X size={14} /> Cancel
-            </button>
-          )}
-        </div>
-
-        <div className="op-filter-group">
           <div className="op-filter-label">Variants</div>
           <button className="op-btn-ghost" onClick={() => setShowVariants(true)} title="Add or edit printing variants (parallel, manga, custom...)">
             Manage variants
@@ -3550,42 +3424,23 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
 
       {showVariants && <VariantsModal onClose={() => setShowVariants(false)} />}
 
-      {prefetching && (
-        <div className="op-prefetch">
-          <div className="op-prefetch-bar">
-            <div
-              className="op-prefetch-bar-fill"
-              style={{ width: `${prefetchTotal > 0 ? Math.min(100, (prefetchDone / prefetchTotal) * 100) : 0}%` }}
-            />
-          </div>
-          <div className="op-prefetch-meta">
-            Resolving <strong>{prefetchDone.toLocaleString()}</strong> / {prefetchTotal.toLocaleString()}
-            {prefetchFailed > 0 && <> · {prefetchFailed.toLocaleString()} no-match</>}
-          </div>
-        </div>
-      )}
-      {!prefetching && prefetchTotal > 0 && prefetchDone > 0 && prefetchDone >= prefetchTotal && (
-        <div className="op-prefetch-done">
-          Auto-resolve complete · {(prefetchTotal - prefetchFailed).toLocaleString()} resolved, {prefetchFailed.toLocaleString()} unmatched.
-        </div>
-      )}
-
       {queue.length === 0 ? (
         <div className="op-empty">
           <Package size={36} strokeWidth={1.2} />
-          <div className="op-empty-title">Nothing to resolve here</div>
+          <div className="op-empty-title">No cards match these filters</div>
           <div className="op-empty-sub">
-            {filterMode === 'unresolved' ? 'Every card has a TCGPlayer printing picked.' :
-             filterMode === 'in-collection' ? 'No cards in your collections yet.' :
+            {filterMode === 'in-collection' ? 'No cards in your collections yet.' :
+             filterMode === 'reported' ? "You haven't flagged any cards yet." :
+             search.trim() ? 'Try a different search term.' :
              'Catalog is empty.'}
           </div>
         </div>
       ) : index >= queue.length ? (
         <div className="op-empty">
           <Package size={36} strokeWidth={1.2} />
-          <div className="op-empty-title">Queue cleared</div>
-          <div className="op-empty-sub">You've gone through all {queue.length.toLocaleString()} cards in this queue.</div>
-          <button className="op-btn-primary" onClick={() => setIndex(0)}>Start over</button>
+          <div className="op-empty-title">End of list</div>
+          <div className="op-empty-sub">You've reached the end of {queue.length.toLocaleString()} cards.</div>
+          <button className="op-btn-primary" onClick={() => setIndex(0)}>Back to top</button>
         </div>
       ) : currentCard && (
         <div className="op-resolve">
@@ -4156,8 +4011,6 @@ function Field({ label, children }) {
 function CardDetailDrawer({ card, entries, collections, watchEntry, onClose, onAddToCollection, onRemoveEntry, onToggleErrata, onToggleWatch }) {
   const erratMarked = hasPreErrata(card.id.replace(/__pre-errata$/, ''));
   const isWatched = Boolean(watchEntry);
-  const [history, setHistory] = useState([]);
-  const [historyLoading, setHistoryLoading] = useState(true);
   // Force re-read of resolution / report state when the user takes an action
   // (report / clear / re-resolve). Local state since the global variantRev
   // doesn't bump on report changes.
@@ -4167,24 +4020,6 @@ function CardDetailDrawer({ card, entries, collections, watchEntry, onClose, onA
   const resolution = getResolution(cid);
   const diagnostic = diagnoseResolution(card, resolution);
   const report = getMatchReport(cid);
-
-  useEffect(() => {
-    let cancelled = false;
-    setHistoryLoading(true);
-    loadPriceHistory(card.id).then(h => {
-      if (!cancelled) {
-        setHistory(h);
-        setHistoryLoading(false);
-      }
-    });
-    return () => { cancelled = true; };
-  }, [card.id]);
-
-  const trend = useMemo(() => {
-    if (history.length < 2) return 0;
-    const first = history[0].price, last = history[history.length - 1].price;
-    return first > 0 ? ((last - first) / first) * 100 : 0;
-  }, [history]);
 
   const handleReportMatch = () => {
     const note = prompt(
@@ -4227,18 +4062,15 @@ function CardDetailDrawer({ card, entries, collections, watchEntry, onClose, onA
               <VariantPill variant={card.variant} />
             </div>
             <div className="op-drawer-hero-set">{card.setName}</div>
-            {card.text && <div className="op-drawer-hero-text">{card.text}</div>}
           </div>
         </div>
 
         <div className="op-drawer-body">
           <div className="op-price-grid">
-            <PriceCell label="Raw" value={`$${effectiveRawPrice(card).toFixed(2)}`} accent />
-            <PriceCell
-              label="14d trend"
-              value={historyLoading ? '…' : `${trend >= 0 ? '+' : ''}${trend.toFixed(1)}%`}
-              tone={trend >= 0 ? 'pos' : 'neg'}
-            />
+            <PriceCell label="Market" value={`$${effectiveRawPrice(card).toFixed(2)}`} accent />
+            {card.lowPrice > 0 && <PriceCell label="Low" value={`$${Number(card.lowPrice).toFixed(2)}`} />}
+            {card.midPrice > 0 && <PriceCell label="Mid" value={`$${Number(card.midPrice).toFixed(2)}`} />}
+            {card.highPrice > 0 && <PriceCell label="High" value={`$${Number(card.highPrice).toFixed(2)}`} />}
           </div>
 
           <div className="op-section-title">
@@ -4294,15 +4126,6 @@ function CardDetailDrawer({ card, entries, collections, watchEntry, onClose, onA
             <div className="op-empty-mini">
               No TCGPlayer pick saved yet. Visit the Resolve view, or just open the card from search — auto-resolve fires on viewport entry.
             </div>
-          )}
-
-          <div className="op-section-title"><BarChart3 size={15} /> 14-day price history</div>
-          {historyLoading ? (
-            <div className="op-empty-mini">Loading price history…</div>
-          ) : history.length < 2 ? (
-            <div className="op-empty-mini">Not enough history available for this card yet.</div>
-          ) : (
-            <PriceChart data={history} color={fallbackColor(card.color)} />
           )}
 
           <div className="op-section-title"><Folder size={15} /> Copies in your collections ({entries.length})</div>
@@ -4385,39 +4208,3 @@ function PriceCell({ label, value, tone, accent }) {
   );
 }
 
-function PriceChart({ data, color }) {
-  const W = 600, H = 160, P = 22;
-  const prices = data.map(d => d.price);
-  const min = Math.min(...prices), max = Math.max(...prices);
-  const range = max - min || 1;
-  const pts = data.map((d, i) => {
-    const x = P + (i / Math.max(1, data.length - 1)) * (W - P * 2);
-    const y = H - P - ((d.price - min) / range) * (H - P * 2);
-    return { x, y, price: d.price, date: d.date };
-  });
-  const path = pts.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x} ${p.y}`).join(' ');
-  const area = `${path} L ${pts[pts.length - 1].x} ${H - P} L ${pts[0].x} ${H - P} Z`;
-
-  return (
-    <div className="op-chart">
-      <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" className="op-chart-svg">
-        <defs>
-          <linearGradient id="chartFill" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor={color} stopOpacity="0.35" />
-            <stop offset="100%" stopColor={color} stopOpacity="0" />
-          </linearGradient>
-        </defs>
-        <path d={area} fill="url(#chartFill)" />
-        <path d={path} fill="none" stroke={color} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-        {pts.map((p, i) => (
-          <circle key={i} cx={p.x} cy={p.y} r="3" fill={color} />
-        ))}
-      </svg>
-      <div className="op-chart-axis">
-        <span>{data[0].date}</span>
-        <span>${min.toFixed(2)} – ${max.toFixed(2)}</span>
-        <span>{data[data.length - 1].date}</span>
-      </div>
-    </div>
-  );
-}
