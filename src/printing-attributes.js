@@ -109,8 +109,6 @@ export const onPrintingAttributesChanged = (cb) => {
 const emit = () => { for (const cb of listeners) { try { cb(); } catch {} } };
 
 // Mutations — used by the Variants manager UI.
-export const listUserVariants = () => loadUserEntries();
-
 export const addUserVariant = ({ key, label, mode = 'text', value }) => {
   const norm = String(key || '').trim().toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '');
   if (!norm || !label?.trim() || !value?.trim()) return { ok: false, error: 'key, label, and value are required' };
@@ -124,19 +122,6 @@ export const addUserVariant = ({ key, label, mode = 'text', value }) => {
   rebuild();
   emit();
   return { ok: true, entry };
-};
-
-export const updateUserVariant = (key, patch) => {
-  const list = loadUserEntries();
-  const idx = list.findIndex(e => e.key === key);
-  if (idx < 0) return { ok: false, error: 'not found' };
-  const next = { ...list[idx], ...patch };
-  if (!compile(next)) return { ok: false, error: 'pattern failed to compile' };
-  list[idx] = next;
-  saveUserEntries(list);
-  rebuild();
-  emit();
-  return { ok: true, entry: next };
 };
 
 export const removeUserVariant = (key) => {

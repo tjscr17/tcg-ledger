@@ -15,8 +15,7 @@
 // ============================================================================
 
 import { store, MODE } from './storage.js';
-import { getPrintingAttributes, detectPrintingAttributes } from './printing-attributes.js';
-import { applyAttributeOverride } from './card-attribute-overrides.js';
+import { detectPrintingAttributes } from './printing-attributes.js';
 
 const PRICE_CACHE_KEY = 'optcg:tcgcsv:prices:v1';
 const PRICE_TTL_MS = 6 * 60 * 60 * 1000; // 6h — TCGCSV refreshes daily, this is generous
@@ -95,10 +94,9 @@ const scheduleResolutionPersist = () => {
 };
 
 // Synchronous lookup: returns the TCGPlayer productId for a canonical
-// card id, or null when we haven't resolved one yet. Also tries the
-// legacy OPTCG-style id as a fallback key — useful right after the
-// canonical migration when a row may have been keyed under either form.
-export const getTcgId = (cardId, legacyId) => {
+// card id, or null when we haven't resolved one yet. Internal — consumers
+// should go through effectiveTcgId, which falls back to card.tcg_id.
+const getTcgId = (cardId, legacyId) => {
   if (!cardId && !legacyId) return null;
   const map = ensureResolutionMap();
   const hit = (cardId && map.get(cardId)?.tcg_id)
@@ -282,146 +280,15 @@ export const ensurePriceForCard = async (card) => {
 };
 
 // ---------------------------------------------------------------------------
-// Variant resolution (Stage 3): find all TCGPlayer products matching an
-// OPTCG card identity, and persist the user's pick so future price lookups
-// know which printing this is.
+// Resolution writes — saveResolution is still called by the
+// runTcgplayerMigration in migrate.js to rewrite legacy resolutions from the
+// OPTCGAPI-era card_ids onto the new TCGPlayer-source canonicals. The user-
+// facing override picker that used to drive writes here was removed in the
+// 2026-06-01 catalog rebrand; new writes only happen during migrations.
 // ---------------------------------------------------------------------------
 
-// Strip our canonical-id format down to the bare card identity expected by
-// TCGCSV's `?number=` search. Canonical id format:
-//   [<sourceSet>:]<displayId>[-<variantTag>]
-// We want just `<displayId>` (e.g. "ST01-004").
-export const cardNumberFromCanonical = (canonicalId) => {
-  if (!canonicalId) return '';
-  // Drop the optional source-set prefix.
-  const afterColon = canonicalId.includes(':') ? canonicalId.split(':')[1] : canonicalId;
-  // Keep just the leading `<setCode>-<cardNumber>` (canonical guarantees
-  // setCode is letters+digits and cardNumber is digits).
-  const m = afterColon.match(/^[A-Z]+\d+-\d+/i);
-  return m ? m[0].toUpperCase() : afterColon.toUpperCase();
-};
-
-// Fetch all TCGPlayer products whose extendedData.Number matches `displayId`.
-// Each entry is enriched with the current price snapshot. Returns [] on
-// error. Caller is responsible for any UI throttling.
-export const searchTcgProducts = async (displayId) => {
-  const number = (displayId || '').trim().toUpperCase();
-  if (!number) return [];
-  try {
-    const r = await fetch(`/api/tcgcsv?number=${encodeURIComponent(number)}`);
-    if (!r.ok) return [];
-    const body = await r.json();
-    const products = Array.isArray(body?.products) ? body.products : [];
-    // Re-derive attributes client-side so user-defined variants take effect
-    // even though the server's prebuilt is_parallel / is_manga hints don't
-    // know about them. The proxy's hints become decorative.
-    return products.map(p => ({ ...p, attributes: detectPrintingAttributes(p.name) }));
-  } catch (e) {
-    console.warn('[tcgcsv] product search failed for', number, e);
-    return [];
-  }
-};
-
-// True if the card has the given attribute. Applies per-card user overrides
-// when the card carries a canonicalId; falls back to derived booleans for
-// legacy card objects (pre-attributes-refactor) that lack the array.
-const cardHasAttr = (card, key) => {
-  if (Array.isArray(card?.attributes)) {
-    const effective = card.canonicalId
-      ? applyAttributeOverride(card.canonicalId, card.attributes)
-      : card.attributes;
-    return effective.includes(key);
-  }
-  if (key === 'parallel') return Boolean(card?.isParallel);
-  if (key === 'manga') return Boolean(card?.isManga);
-  return false;
-};
-
-// True if a product has the attribute. Products always carry `attributes`
-// after searchTcgProducts decoration; fall back to the legacy is_* fields
-// for cached resolution snapshots saved before the refactor.
-const productHasAttr = (product, key) => {
-  if (Array.isArray(product?.attributes)) return product.attributes.includes(key);
-  if (key === 'parallel') return Boolean(product?.is_parallel);
-  if (key === 'manga') return Boolean(product?.is_manga);
-  return false;
-};
-
-// Pick the TCGPlayer product that best matches a given catalog card. Scoring
-// is generic across the printing-attribute registry — every attribute key
-// (parallel, manga, plus any user-defined) contributes +60 when card and
-// product agree on it. Other weights:
-//   +100  group_abbreviation matches the card's source set
-//   + 10  has a market price (prefer products with actual pricing data)
-// Ties broken by market_price desc. Returns null if products is empty.
-export const pickBestMatchForCard = (card, products) => {
-  if (!card || !Array.isArray(products) || products.length === 0) return null;
-  const cardSetNorm = (card.setId || '').replace(/-/g, '').toUpperCase();
-  const attrDefs = getPrintingAttributes();
-  const scored = products.map(p => {
-    let score = 0;
-    const abbrNorm = (p.group_abbreviation || '').replace(/-/g, '').toUpperCase();
-    if (cardSetNorm && abbrNorm && abbrNorm === cardSetNorm) score += 100;
-    for (const def of attrDefs) {
-      if (cardHasAttr(card, def.key) === productHasAttr(p, def.key)) score += 60;
-    }
-    if (p.market_price != null && p.market_price > 0) score += 10;
-    return { product: p, score, price: Number(p.market_price) || 0 };
-  });
-  scored.sort((a, b) => b.score - a.score || b.price - a.price);
-  return scored[0]?.product || null;
-};
-
-// Returns a TCGPlayer product ONLY when the match is unambiguous — i.e.
-// exactly one candidate agrees with the card on the source set AND every
-// printing attribute in the registry. Returns null when ambiguous so the
-// caller knows to stop and ask the user. This is the bar for auto-resolve.
-export const confidentMatchForCard = (card, products) => {
-  if (!card || !Array.isArray(products) || products.length === 0) return null;
-  if (products.length === 1) return products[0];
-  const cardSetNorm = (card.setId || '').replace(/-/g, '').toUpperCase();
-  const attrDefs = getPrintingAttributes();
-  const exact = products.filter(p => {
-    const abbrNorm = (p.group_abbreviation || '').replace(/-/g, '').toUpperCase();
-    if (!cardSetNorm || !abbrNorm || abbrNorm !== cardSetNorm) return false;
-    for (const def of attrDefs) {
-      if (cardHasAttr(card, def.key) !== productHasAttr(p, def.key)) return false;
-    }
-    return true;
-  });
-  return exact.length === 1 ? exact[0] : null;
-};
-
-// Resolve a card by searching TCGCSV and picking the best match (set +
-// parallel flag aware). Persists the result via saveResolution so future
-// reads hit the cache. Returns the picked product or null. No-op if the
-// card already has a resolution.
-export const autoResolveCard = async (card) => {
-  if (!card) return null;
-  const cid = card.canonicalId || card.id;
-  if (!cid) return null;
-  // Wait for shared-mode Supabase resolutions to load before treating this
-  // card as unresolved — otherwise every page refresh re-resolves cards that
-  // are already saved (see the resolutionsReady gate above).
-  await whenResolutionsReady();
-  // Already resolved? Don't waste a network round-trip.
-  if (getTcgId(cid, card.id)) {
-    const existing = getResolution(cid);
-    if (existing) return existing;
-  }
-  const number = cardNumberFromCanonical(cid) || card.displayId;
-  if (!number) return null;
-  const products = await searchTcgProducts(number);
-  const pick = pickBestMatchForCard(card, products);
-  if (!pick) return null;
-  saveResolution(cid, pick);
-  return pick;
-};
-
-// Persist the user's chosen TCGPlayer product for a card. Writes to the
-// local resolution cache (synchronous), then fire-and-forget syncs to
-// shared mode's card_resolutions table. The price snapshot is also written
-// to the price cache so the UI shows it instantly without an extra fetch.
+// Persist a TCGPlayer-product snapshot for a canonical card id. The migration
+// uses this to move resolutions onto new canonical ids; nothing else writes.
 export const saveResolution = (cardId, productSummary, { confirmed = false } = {}) => {
   if (!cardId || !productSummary?.tcg_id) return;
   const tcgId = Number(productSummary.tcg_id);
@@ -563,13 +430,6 @@ export const getMatchReport = (cardId) => {
   return reports[cardId] || null;
 };
 
-// All reports as `{ cardId, ...row }[]`. Used to populate the "Reported"
-// queue in the Resolve view.
-export const getAllMatchReports = () => {
-  const reports = readReports();
-  return Object.entries(reports).map(([cardId, row]) => ({ cardId, ...row }));
-};
-
 // Clear a card's report (typically called after the user re-resolves it).
 export const clearMatchReport = (cardId) => {
   if (!cardId) return;
@@ -579,50 +439,6 @@ export const clearMatchReport = (cardId) => {
     writeReports(reports);
     emitReportChanged(cardId);
   }
-};
-
-// Diagnose a resolution: does the picked product agree with the catalog card
-// on the source set and on every printing attribute? Returns an object the
-// Resolve view uses to surface issues. Pure read.
-//
-// `attributeMatches` is a generic `{key, label, ok}[]` array driven by the
-// printing-attribute registry, so the Resolve UI can render per-attribute
-// match rows without knowing which attributes exist.
-export const diagnoseResolution = (card, resolution) => {
-  if (!card || !resolution || !resolution.tcg_id) {
-    return { resolved: false, issues: [], setMatch: null, attributeMatches: [] };
-  }
-  const cardSetNorm = (card.setId || '').replace(/-/g, '').toUpperCase();
-  const productSetNorm = (resolution.group_abbreviation || '')
-    .replace(/-/g, '')
-    .toUpperCase();
-  const setMatch = cardSetNorm && productSetNorm
-    ? cardSetNorm === productSetNorm
-    : null; // null = can't compare (one side missing)
-
-  // For each registered attribute, do card and product agree?
-  // Resolution snapshots saved before the refactor lack `attributes`, so
-  // re-derive from the saved name if needed to keep diagnosis consistent.
-  const resolutionView = Array.isArray(resolution.attributes)
-    ? resolution
-    : { ...resolution, attributes: detectPrintingAttributes(resolution.name) };
-  const attributeMatches = getPrintingAttributes().map(def => ({
-    key: def.key,
-    label: def.label,
-    ok: cardHasAttr(card, def.key) === productHasAttr(resolutionView, def.key),
-  }));
-
-  const issues = [];
-  if (setMatch === false) issues.push('set');
-  for (const m of attributeMatches) if (!m.ok) issues.push(m.key);
-
-  // A missing price is a TCGCSV data gap (no recent sales, or just not fetched
-  // yet), NOT a bad match — surfaced via `hasPrice` for display but does NOT
-  // count as an issue. Otherwise a correctly-matched card with no price
-  // would be stuck in the Issues queue forever.
-  const snap = getCachedSnapshot(resolution.tcg_id);
-  const hasPrice = snap && Number(snap.market_price) > 0;
-  return { resolved: true, issues, setMatch, attributeMatches, hasPrice };
 };
 
 // Forget a resolution (lets the user redo the picker). Only touches the

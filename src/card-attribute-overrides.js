@@ -103,13 +103,3 @@ export const removeAttributeFromCard = (cardId, attrKey, detectedHasIt) => {
   emit(cardId);
 };
 
-// Clear every override for a card.
-export const clearCardAttributeOverride = (cardId) => {
-  if (!cardId) return;
-  const o = ensure();
-  if (!o[cardId]) return;
-  delete o[cardId];
-  cache = o;
-  save(o);
-  emit(cardId);
-};

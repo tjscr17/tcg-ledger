@@ -6,17 +6,15 @@ import { hasPsaToken, fetchCert, findCandidateCards } from './psa.js';
 import { runCanonicalMigration, runPcCleanup, runTcgplayerMigration, runClearLegacyResolutions } from './migrate.js';
 import {
   getMarketPriceForCard, ensurePriceForCard, onPriceResolved,
-  getResolution,
   getCachedImageForCard,
   hydrateResolutionsFromShared, subscribeToSharedResolutions, whenResolutionsReady,
   getHydratedResolutionCount,
-  getTcgId,
-  diagnoseResolution, reportBadMatch, getMatchReport, clearMatchReport, getAllMatchReports,
+  reportBadMatch, getMatchReport, clearMatchReport,
   onMatchReportChanged,
 } from './pricing.js';
 import {
-  getPrintingAttributes, detectPrintingAttributes, printingAttribute,
-  listUserVariants, addUserVariant, updateUserVariant, removeUserVariant,
+  getPrintingAttributes, printingAttribute,
+  addUserVariant, removeUserVariant,
   onPrintingAttributesChanged,
 } from './printing-attributes.js';
 import {
@@ -72,9 +70,9 @@ const effectiveRawPrice = (card) => {
 
 // useEnhancedImage: returns [ref, url]. Attach ref to the rendered element
 // so we only kick off a price fetch when the card scrolls into the viewport
-// (with a 200px margin so we pre-fetch just before it appears). Image
-// fallback comes from the saved TCGCSV resolution (or the TCGPlayer CDN
-// constructed from tcg_id) when OPTCGAPI didn't supply card.imageUrl.
+// (with a 200px margin so we pre-fetch just before it appears). TCGPlayer-
+// sourced cards always carry card.imageUrl directly; the cached fallback in
+// pricing.js covers edge cases where imageUrl is missing.
 const useEnhancedImage = (card) => {
   const ref = useRef(null);
   const synchronousImage = card?.imageUrl || (card ? getCachedImageForCard(card) : null);
@@ -3217,31 +3215,17 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
   useEffect(() => onPrintingAttributesChanged(() => setResolveRev(r => r + 1)), []);
 
   const cidOf = (c) => c.canonicalId || c.id;
-  const isResolved = (c) => Boolean(getResolution(cidOf(c)));
-  const hasIssues = (c) => {
-    const r = getResolution(cidOf(c));
-    if (!r) return false;
-    // A human-confirmed pick is never an "issue" — the set/parallel check is
-    // just a heuristic, and saving in the resolver is the user overruling it.
-    if (r.confirmed) return false;
-    const diag = diagnoseResolution(c, r);
-    return diag.issues.length > 0;
-  };
   const isReported = (c) => Boolean(getMatchReport(cidOf(c)));
 
-  // Roll-up counts surfaced in the troubleshooting header.
+  // Roll-up counts shown in the Catalog header. Only `total` and `reported`
+  // are surfaced today — `Resolved` / `Unresolved` / `Issues` are gone with
+  // the override workflow.
   const counts = useMemo(() => {
-    let resolved = 0, unresolved = 0, issues = 0, reported = 0;
+    let reported = 0;
     for (const c of catalog) {
       if (isReported(c)) reported++;
-      if (isResolved(c)) {
-        resolved++;
-        if (hasIssues(c)) issues++;
-      } else {
-        unresolved++;
-      }
     }
-    return { resolved, unresolved, issues, reported, total: catalog.length };
+    return { reported, total: catalog.length };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [catalog, resolveRev]);
 
@@ -3251,10 +3235,6 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
       // entries.card_id is canonical post-migration; match against canonicalId.
       const ids = new Set(entries.map(e => e.card_id));
       base = catalog.filter(c => ids.has(cidOf(c)));
-    } else if (filterMode === 'unresolved') {
-      base = catalog.filter(c => !isResolved(c));
-    } else if (filterMode === 'issues') {
-      base = catalog.filter(c => hasIssues(c));
     } else if (filterMode === 'reported') {
       base = catalog.filter(c => isReported(c));
     } else {
@@ -3262,15 +3242,11 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
     }
     const q = search.trim().toLowerCase();
     if (!q) return base;
-    // Searches OPTCG identity (name, display id, set name) AND the saved
-    // TCGPlayer pick name — so you can find a card by either side.
     return base.filter(c => {
       if ((c.name || '').toLowerCase().includes(q)) return true;
       if ((c.displayId || '').toLowerCase().includes(q)) return true;
       if ((c.id || '').toLowerCase().includes(q)) return true;
       if ((c.setName || '').toLowerCase().includes(q)) return true;
-      const r = getResolution(cidOf(c));
-      if (r && (r.name || '').toLowerCase().includes(q)) return true;
       return false;
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -3292,7 +3268,6 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
     return catalog.filter(c => c.displayId === currentCard.displayId && c.id !== currentCard.id);
   }, [catalog, currentCard?.displayId, currentCard?.id]);
 
-  const currentResolution = currentCid ? getResolution(currentCid) : null;
   const currentReport = currentCid ? getMatchReport(currentCid) : null;
   const [reportNote, setReportNote] = useState('');
   // Reset note input when the user moves to a different card.

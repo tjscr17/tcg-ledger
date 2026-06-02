@@ -277,6 +277,3 @@ export const findCandidateCards = (cert, catalog) => {
   return out;
 };
 
-// Best single guess for the cert. Returns the top candidate or null.
-export const matchCatalogCard = (cert, catalog) =>
-  findCandidateCards(cert, catalog)[0] || null;

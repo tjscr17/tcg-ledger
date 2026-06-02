@@ -627,12 +627,6 @@ body { background: var(--paper); }
   line-height: 1.05; margin-top: 10px; letter-spacing: -0.01em;
 }
 .op-drawer-hero-set { font-style: italic; opacity: 0.78; margin-top: 4px; font-family: var(--display); font-size: 14px; }
-.op-drawer-hero-text {
-  margin-top: 14px; padding: 10px 12px;
-  background: rgba(255,255,255,0.06);
-  font-size: 12px; line-height: 1.5;
-  border-left: 2px solid var(--gold);
-}
 .op-drawer-body { padding: 24px 28px 40px; }
 
 .op-price-grid {
@@ -659,13 +653,6 @@ body { background: var(--paper); }
   color: var(--ink-soft); margin: 24px 0 12px;
   padding-bottom: 8px; border-bottom: 1px solid var(--line);
 }
-.op-chart { background: var(--paper); border: 1px solid var(--line); padding: 16px; }
-.op-chart-svg { width: 100%; height: 160px; display: block; }
-.op-chart-axis {
-  display: flex; justify-content: space-between; margin-top: 8px;
-  font-family: var(--mono); font-size: 10px; color: var(--ink-soft);
-}
-
 .op-detail-entries { display: flex; flex-direction: column; gap: 10px; }
 .op-detail-entry { background: var(--paper); border: 1px solid var(--line); padding: 14px; }
 .op-detail-entry-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
@@ -717,11 +704,6 @@ body { background: var(--paper); }
   margin-top: 10px; padding: 8px 12px; background: var(--paper-warm);
   border-left: 3px solid var(--jade);
   font-family: var(--mono); font-size: 11px; color: var(--ink-soft);
-}
-.op-graded-caveat {
-  margin-top: 8px; padding: 8px 12px; background: rgba(196, 145, 47, 0.12);
-  border-left: 3px solid var(--gold);
-  font-size: 12px; color: var(--ink-soft); line-height: 1.4;
 }
 .op-graded-error {
   margin-top: 8px; padding: 8px 12px; background: rgba(200, 68, 42, 0.1);
@@ -1048,30 +1030,7 @@ body { background: var(--paper); }
   .op-equity-num { text-align: left; }
 }
 
-/* PREFETCH PROGRESS */
-.op-prefetch {
-  margin: 12px 0 20px; padding: 12px 16px;
-  background: var(--paper-warm); border: 1px solid var(--line-strong);
-  display: flex; flex-direction: column; gap: 8px;
-}
-.op-prefetch-bar {
-  width: 100%; height: 6px;
-  background: var(--paper); border: 1px solid var(--line); overflow: hidden;
-}
-.op-prefetch-bar-fill {
-  height: 100%; background: var(--jade);
-  transition: width 0.3s ease;
-}
-.op-prefetch-meta {
-  font-family: var(--mono); font-size: 11px; color: var(--ink-soft);
-}
-.op-prefetch-done {
-  margin: 12px 0 20px; padding: 10px 16px;
-  background: rgba(61, 122, 74, 0.1); border-left: 3px solid var(--jade);
-  font-size: 12px; color: var(--ink);
-}
-
-/* RESOLVE VIEW */
+/* CATALOG / RESOLVE VIEW */
 .op-resolve { margin-top: 20px; }
 .op-resolve-progress {
   font-family: var(--mono); font-size: 11px; color: var(--ink-soft);
@@ -1103,10 +1062,7 @@ body { background: var(--paper); }
   text-decoration: underline; margin-top: 4px;
 }
 .op-resolve-side-link:hover { color: var(--berry-deep); }
-.op-resolve-meta { display: flex; flex-direction: column; gap: 10px; }
-
-/* Candidate picker — replaces the dropdown so the user can see each option's
-   set, parallel flag, rarity, and price at once. */
+/* Related-printings list — clickable buttons for sibling catalog cards. */
 .op-resolve-candidates {
   display: flex; flex-direction: column; gap: 4px;
   max-height: 360px; overflow-y: auto;
@@ -1139,22 +1095,6 @@ body { background: var(--paper); }
 .op-resolve-candidate-price {
   margin-left: auto; font-weight: 700; color: var(--ink);
 }
-.op-resolve-name {
-  font-family: var(--display); font-weight: 600; font-size: 28px; line-height: 1.1;
-  margin-top: 2px;
-}
-.op-resolve-sub { font-family: var(--mono); font-size: 11px; color: var(--ink-soft); }
-.op-resolve-prices {
-  display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px 18px;
-  padding: 10px 12px; background: var(--paper-warm); border: 1px solid var(--line);
-  margin-top: 4px;
-}
-.op-resolve-price-row { display: flex; justify-content: space-between; align-items: baseline; }
-.op-resolve-price-label {
-  font-family: var(--mono); font-size: 9px; font-weight: 600;
-  letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-soft);
-}
-.op-resolve-price-val { font-family: var(--display); font-weight: 600; font-size: 14px; }
 .op-resolve-actions { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
 .op-resolve-diag {
   margin-top: 10px; padding: 10px 12px;
@@ -1162,11 +1102,6 @@ body { background: var(--paper); }
   border-left-width: 4px; border-left-color: var(--jade);
 }
 .op-resolve-diag.has-issues { border-left-color: var(--rust); }
-.op-resolve-diag-head {
-  font-family: var(--mono); font-size: 10px; font-weight: 600;
-  letter-spacing: 0.16em; text-transform: uppercase; color: var(--ink-soft);
-  margin-bottom: 6px;
-}
 .op-resolve-diag-row {
   display: flex; justify-content: space-between; align-items: baseline;
   font-size: 12px; padding: 2px 0;

@@ -1,27 +1,27 @@
 // ============================================================================
 // Card catalog — TCGPlayer (via TCGCSV) as the single source of truth.
 //
-// We hit /api/tcgcsv?all=1 once on first load, get every product TCGPlayer
-// has in the One Piece TCG category (~3000–5000 products including the
-// release-event "RE" groups and tournament "ANN" prize sets that OPTCGAPI
-// doesn't ship), and assemble a catalog where each card IS a TCGPlayer
-// product. This means every card knows its `tcg_id` at catalog-build time —
-// no per-card Resolve step is needed for the default mapping. The user-
-// edited resolution layer (in pricing.js) survives as an OPTIONAL override.
+// Loader iterates TCGPlayer groups: one /api/tcgcsv?groups=1 call to get the
+// group list, then /api/tcgcsv?groupAbbr=X per group with browser-side
+// concurrency 6. Each per-group call is small enough to fit Vercel's
+// serverless timeout reliably; a single ?all=1 path was tried first and
+// 502'd on cold function instances. Total ~5–15s on first load, then
+// 24h-cached in localStorage.
 //
-// Cache: localStorage, keyed by `optcg:catalog:v11:<variant-fingerprint>`.
-// Re-derives when the user edits printing-attribute variants.
+// Cache key: `optcg:catalog:v11:<variant-fingerprint>`. The fingerprint
+// component invalidates the cache when the user edits printing-attribute
+// variants from the Variants manager.
 //
-// Trade-off vs the OPTCGAPI source we replaced (2026-06-01):
+// What you get vs the OPTCGAPI source we replaced (switch: 2026-06-01):
 //   + Complete printing coverage (every TCGPlayer product, every event set).
-//   + Each card already knows its tcg_id — no "unresolved" workflow.
+//   + Each card already knows its tcg_id at build time — no per-card Resolve.
 //   − No game data: color, type, cost, power, life, counter, attribute,
 //     sub_types, card text. TCGPlayer is sales metadata.
-//   − Card names are sales-formatted with the parenthetical variant suffixes
-//     intact (e.g., "Shanks (Parallel) (Manga Rare)"); we keep the cleaned
-//     form as `name` and the full form as `fullName`.
-//   − Pre-errata twins are still supported (purely user-marked), but the
-//     OPTCGAPI-curated errata-set heuristic is gone.
+//   − Card names are sales-formatted with parenthetical variant suffixes
+//     intact (`Shanks (Parallel) (Manga Rare)`); the cleaned form lives on
+//     `card.name`, the full form on `card.fullName`.
+//   − Pre-errata twins still supported (purely user-marked via
+//     togglePreErrata); the OPTCGAPI-curated errata heuristic is gone.
 //   − No 14-day price history (OPTCGAPI's `/twoweeks/` endpoint).
 // ============================================================================
 
@@ -78,7 +78,7 @@ const cleanGameName = (rawName) => {
 //     (e.g., "parallel", "manga", "manga-parallel"). Empty for base printings.
 // Collisions (multiple products sharing the same canonical) get a `-<tcg_id>`
 // suffix appended downstream in `finalizeCanonicalIds`.
-export const canonicalIdOf = (card) => {
+const canonicalIdOf = (card) => {
   if (!card) return '';
   const display = card.displayId || '';
   const sourceNorm = normSetToken(card.setId);

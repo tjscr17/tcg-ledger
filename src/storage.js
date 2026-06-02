@@ -28,7 +28,6 @@ export const MODE = isShared ? 'shared' : 'solo';
 // "column foo doesn't exist" — instead of pointing the user at the console.
 let lastStoreError = null;
 export const getLastStoreError = () => lastStoreError;
-export const clearLastStoreError = () => { lastStoreError = null; };
 
 // ----- Solo (localStorage) -----
 const lsKey = (table) => `optcg:${VAULT_KEY}:${table}`;
