@@ -27,7 +27,8 @@
 
 import { detectPrintingAttributes, printingAttributesFingerprint } from './printing-attributes.js';
 
-const CATALOG_ENDPOINT = '/api/tcgcsv?all=1';
+const GROUPS_ENDPOINT = '/api/tcgcsv?groups=1';
+const groupEndpoint = (abbr) => `/api/tcgcsv?groupAbbr=${encodeURIComponent(abbr)}`;
 // v11 = TCGPlayer-sourced catalog (was v10 OPTCGAPI-sourced). The fingerprint
 // suffix invalidates cache when the user edits variant detection rules.
 const CACHE_KEY_BASE = 'optcg:catalog:v11';
@@ -219,11 +220,37 @@ export const loadCatalog = async ({ force = false } = {}) => {
   return revalidateCatalog();
 };
 
+// Iterate TCGPlayer groups via the proxy, fetching products per group in
+// parallel (browser-side, bounded concurrency). This is much more reliable
+// than one big `?all=1` call — each per-group call is ~600–900 ms, well
+// inside Vercel's serverless timeout even on a cold function instance.
+const fetchAllProducts = async () => {
+  const groupsBody = await fetchJSON(GROUPS_ENDPOINT);
+  const groups = Array.isArray(groupsBody?.groups) ? groupsBody.groups : [];
+  if (groups.length === 0) return [];
+  const all = [];
+  const concurrency = 6;
+  let next = 0;
+  const workers = Array.from({ length: Math.min(concurrency, groups.length) }, async () => {
+    while (next < groups.length) {
+      const g = groups[next++];
+      if (!g.abbreviation) continue;
+      try {
+        const body = await fetchJSON(groupEndpoint(g.abbreviation));
+        if (Array.isArray(body?.products)) all.push(...body.products);
+      } catch (e) {
+        console.warn(`[catalog] group ${g.abbreviation} fetch failed`, e);
+      }
+    }
+  });
+  await Promise.all(workers);
+  return all;
+};
+
 const revalidateCatalog = async () => {
   if (catalogPromise) return catalogPromise;
   catalogPromise = (async () => {
-    const body = await fetchJSON(CATALOG_ENDPOINT);
-    const products = Array.isArray(body?.products) ? body.products : [];
+    const products = await fetchAllProducts();
     const cards = products.map(normalize).filter(c => c.id && c.displayId);
     finalizeCanonicalIds(cards);
     const final = cards.sort((a, b) => {

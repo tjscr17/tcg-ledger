@@ -358,40 +358,48 @@ export default defineConfig(({ mode }) => {
                 return;
               }
               try {
-                await ensureIndex();
-                let matchedGroupId = null;
-                let matchedAbbr = '';
-                let matchedName = '';
-                for (const [gid, abbr] of groupAbbrIndex.entries()) {
-                  if ((abbr || '').toUpperCase().replace(/\s+/g, '') === wanted) {
-                    matchedGroupId = gid;
-                    matchedAbbr = abbr;
-                    matchedName = groupNameIndex.get(gid) || '';
-                    break;
-                  }
-                }
-                if (!matchedGroupId) {
+                const groupsData = await fetchJSON(`${TCGCSV_BASE}/${CATEGORY_ID}/groups`);
+                const matched = (groupsData.results || []).find(g =>
+                  (g.abbreviation || '').toUpperCase().replace(/\s+/g, '') === wanted
+                );
+                if (!matched) {
                   res.statusCode = 404;
                   res.end(JSON.stringify({ error: `no TCGPlayer group with abbreviation "${groupAbbrRaw}"` }));
                   return;
                 }
-                const productIds = [];
-                for (const [pid, info] of productIndex.entries()) {
-                  if (info.groupId === matchedGroupId) productIds.push(pid);
-                }
-                const products = await Promise.all(productIds.map(async (id) => {
-                  const info = productIndex.get(id);
-                  if (!info) return null;
-                  return productPayload(id, info);
-                }));
-                const filtered = products.filter(Boolean);
-                filtered.sort((a, b) => (a.number || '').localeCompare(b.number || ''));
+                const [productsData, prices] = await Promise.all([
+                  fetchJSON(`${TCGCSV_BASE}/${CATEGORY_ID}/${matched.groupId}/products`),
+                  getGroupPrices(matched.groupId),
+                ]);
+                const products = (productsData.results || []).map(p => {
+                  const record = pickPriceRecord(prices, p.productId);
+                  return {
+                    tcg_id: p.productId,
+                    group_id: matched.groupId,
+                    group_abbreviation: matched.abbreviation || '',
+                    group_name: matched.name || '',
+                    name: p.name || '',
+                    clean_name: p.cleanName || '',
+                    image_url: p.imageUrl || '',
+                    tcgplayer_url: p.url || '',
+                    number: extField(p.extendedData, 'Number'),
+                    rarity: extField(p.extendedData, 'Rarity'),
+                    is_parallel: detectIsParallel(p.name),
+                    is_manga: detectIsManga(p.name),
+                    market_price: record?.marketPrice ?? null,
+                    low_price: record?.lowPrice ?? null,
+                    mid_price: record?.midPrice ?? null,
+                    high_price: record?.highPrice ?? null,
+                    sub_type_name: record?.subTypeName ?? null,
+                  };
+                });
+                products.sort((a, b) => (a.number || '').localeCompare(b.number || ''));
                 res.statusCode = 200;
                 res.end(JSON.stringify({
-                  group_id: matchedGroupId,
-                  group_abbreviation: matchedAbbr,
-                  group_name: matchedName,
-                  products: filtered,
+                  group_id: matched.groupId,
+                  group_abbreviation: matched.abbreviation,
+                  group_name: matched.name,
+                  products,
                   fetched_at: new Date().toISOString(),
                 }));
               } catch (e) {
@@ -403,15 +411,12 @@ export default defineConfig(({ mode }) => {
 
             if (groupsRaw) {
               try {
-                await ensureIndex();
-                const groups = [];
-                for (const [gid, abbr] of groupAbbrIndex.entries()) {
-                  groups.push({
-                    group_id: gid,
-                    abbreviation: abbr,
-                    name: groupNameIndex.get(gid) || '',
-                  });
-                }
+                const data = await fetchJSON(`${TCGCSV_BASE}/${CATEGORY_ID}/groups`);
+                const groups = (data.results || []).map(g => ({
+                  group_id: g.groupId,
+                  abbreviation: g.abbreviation || '',
+                  name: g.name || '',
+                }));
                 groups.sort((a, b) => (a.abbreviation || '').localeCompare(b.abbreviation || ''));
                 res.statusCode = 200;
                 res.end(JSON.stringify({ groups, fetched_at: new Date().toISOString() }));

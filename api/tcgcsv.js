@@ -295,49 +295,58 @@ export default async function handler(req, res) {
   }
 
   if (groupAbbrRaw) {
-    // Returns every product belonging to a TCGPlayer group, identified by its
-    // abbreviation (case-insensitive, spaces tolerated — "OP14 RE", "OP14RE",
-    // "op14 re" all match). Used by the "Import from TCGPlayer" feature to
-    // pull entire release-event / tournament sets that OPTCGAPI doesn't ship.
+    // Lean per-group fetch: 3 upstream calls (groups list + group's products
+    // + group's prices), no full-catalog index build. ~600–900 ms even on
+    // cold start, so each individual call easily fits Vercel's timeout. The
+    // catalog client iterates groups via this endpoint to assemble the full
+    // catalog reliably.
     const wanted = String(groupAbbrRaw).trim().toUpperCase().replace(/\s+/g, '');
     if (!wanted) {
       res.status(400).json({ error: 'groupAbbr must be non-empty' });
       return;
     }
     try {
-      await ensureIndex();
-      let matchedGroupId = null;
-      let matchedAbbr = '';
-      let matchedName = '';
-      for (const [gid, abbr] of groupAbbrIndex.entries()) {
-        if ((abbr || '').toUpperCase().replace(/\s+/g, '') === wanted) {
-          matchedGroupId = gid;
-          matchedAbbr = abbr;
-          matchedName = groupNameIndex.get(gid) || '';
-          break;
-        }
-      }
-      if (!matchedGroupId) {
+      const groupsData = await fetchJSON(`${TCGCSV_BASE}/${OP_TCG_CATEGORY_ID}/groups`);
+      const matched = (groupsData.results || []).find(g =>
+        (g.abbreviation || '').toUpperCase().replace(/\s+/g, '') === wanted
+      );
+      if (!matched) {
         res.status(404).json({ error: `no TCGPlayer group with abbreviation "${groupAbbrRaw}"` });
         return;
       }
-      const productIds = [];
-      for (const [pid, info] of productIndex.entries()) {
-        if (info.groupId === matchedGroupId) productIds.push(pid);
-      }
-      const products = await Promise.all(productIds.map(async (id) => {
-        const info = productIndex.get(id);
-        if (!info) return null;
-        return productPayload(id, info);
-      }));
-      const filtered = products.filter(Boolean);
-      filtered.sort((a, b) => (a.number || '').localeCompare(b.number || ''));
+      const [productsData, prices] = await Promise.all([
+        fetchJSON(`${TCGCSV_BASE}/${OP_TCG_CATEGORY_ID}/${matched.groupId}/products`),
+        getGroupPrices(matched.groupId),
+      ]);
+      const products = (productsData.results || []).map(p => {
+        const record = pickPriceRecord(prices, p.productId);
+        return {
+          tcg_id: p.productId,
+          group_id: matched.groupId,
+          group_abbreviation: matched.abbreviation || '',
+          group_name: matched.name || '',
+          name: p.name || '',
+          clean_name: p.cleanName || '',
+          image_url: p.imageUrl || '',
+          tcgplayer_url: p.url || '',
+          number: extField(p.extendedData, 'Number'),
+          rarity: extField(p.extendedData, 'Rarity'),
+          is_parallel: detectIsParallel(p.name),
+          is_manga: detectIsManga(p.name),
+          market_price: record?.marketPrice ?? null,
+          low_price: record?.lowPrice ?? null,
+          mid_price: record?.midPrice ?? null,
+          high_price: record?.highPrice ?? null,
+          sub_type_name: record?.subTypeName ?? null,
+        };
+      });
+      products.sort((a, b) => (a.number || '').localeCompare(b.number || ''));
       res.setHeader('Cache-Control', 's-maxage=3600, stale-while-revalidate=86400');
       res.status(200).json({
-        group_id: matchedGroupId,
-        group_abbreviation: matchedAbbr,
-        group_name: matchedName,
-        products: filtered,
+        group_id: matched.groupId,
+        group_abbreviation: matched.abbreviation,
+        group_name: matched.name,
+        products,
         fetched_at: new Date().toISOString(),
       });
     } catch (e) {
@@ -347,16 +356,14 @@ export default async function handler(req, res) {
   }
 
   if (groupsRaw) {
+    // Lean groups listing: one upstream call, no index build.
     try {
-      await ensureIndex();
-      const groups = [];
-      for (const [gid, abbr] of groupAbbrIndex.entries()) {
-        groups.push({
-          group_id: gid,
-          abbreviation: abbr,
-          name: groupNameIndex.get(gid) || '',
-        });
-      }
+      const data = await fetchJSON(`${TCGCSV_BASE}/${OP_TCG_CATEGORY_ID}/groups`);
+      const groups = (data.results || []).map(g => ({
+        group_id: g.groupId,
+        abbreviation: g.abbreviation || '',
+        name: g.name || '',
+      }));
       groups.sort((a, b) => (a.abbreviation || '').localeCompare(b.abbreviation || ''));
       res.setHeader('Cache-Control', 's-maxage=86400, stale-while-revalidate=86400');
       res.status(200).json({ groups, fetched_at: new Date().toISOString() });
