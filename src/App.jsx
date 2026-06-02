@@ -6,11 +6,11 @@ import { hasPsaToken, fetchCert, findCandidateCards } from './psa.js';
 import { runCanonicalMigration, runPcCleanup, runTcgplayerMigration } from './migrate.js';
 import {
   getMarketPriceForCard, ensurePriceForCard, onPriceResolved,
-  searchTcgProducts, saveResolution, getResolution, clearResolution, cardNumberFromCanonical,
+  getResolution, clearResolution,
   getCachedImageForCard,
   hydrateResolutionsFromShared, subscribeToSharedResolutions, whenResolutionsReady,
   getHydratedResolutionCount,
-  autoResolveCard, getTcgId, pickBestMatchForCard, confidentMatchForCard,
+  autoResolveCard, getTcgId,
   diagnoseResolution, reportBadMatch, getMatchReport, clearMatchReport, getAllMatchReports,
   onMatchReportChanged,
 } from './pricing.js';
@@ -3276,102 +3276,25 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
   const currentCard = queue[index];
   const currentCid = currentCard ? cidOf(currentCard) : '';
 
-  const [candidates, setCandidates] = useState([]);
-  const [selectedPickId, setSelectedPickId] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
-
   useEffect(() => {
     setIndex(0);
   }, [filterMode, search]);
 
-  useEffect(() => {
-    setCandidates([]);
-    setSelectedPickId('');
-    setError('');
-    if (!currentCard) return;
-    const number = cardNumberFromCanonical(currentCid) || currentCard.displayId;
-    if (!number) { setError(`Couldn't extract a card number from ${currentCid || currentCard.id}.`); return; }
-    let cancelled = false;
-    setLoading(true);
-    searchTcgProducts(number).then(matches => {
-      if (cancelled) return;
-      setCandidates(matches);
-      if (matches.length === 0) {
-        setError(`No TCGPlayer match for ${number}.`);
-        return;
-      }
-      const saved = getResolution(currentCid);
-      // Auto-resolve when the match is UNAMBIGUOUS — exactly one candidate
-      // matches this card's set + parallel flag (TCGCSV returns every
-      // printing of a number, so "one product" is rare; "one printing that's
-      // actually this card" is the useful test). Skip auto if we've already
-      // resolved to a different product (respect the manual pick).
-      const confident = confidentMatchForCard(currentCard, matches);
-      // Only auto-save when the user is clearly working a resolve queue. In
-      // "All cards" or "In my collection" they're browsing/searching, and a
-      // silent auto-resolve there is surprising — load candidates and wait
-      // for an explicit Save. "Reported" is also hands-off: the user flagged
-      // those for personal review.
-      const autoResolveAllowed = filterMode === 'unresolved' || filterMode === 'issues';
-      if (autoResolveAllowed && confident && (!saved || saved.tcg_id === confident.tcg_id)) {
-        saveResolution(currentCid, confident);
-        if (currentReport) clearMatchReport(currentCid);
-        setResolveRev(r => r + 1);
-        // In removal queues the card drops out and the next one shifts into
-        // this index — don't advance.
-        return;
-      }
-      const chosen = (saved && matches.find(v => v.tcg_id === saved.tcg_id))
-        || pickBestMatchForCard(currentCard, matches)
-        || matches[0];
-      setSelectedPickId(String(chosen.tcg_id));
-    }).catch(e => {
-      if (!cancelled) setError(e.message || 'Failed to load TCGCSV matches.');
-    }).finally(() => {
-      if (!cancelled) setLoading(false);
-    });
-    return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentCard, currentCid]);
+  // Other catalog cards that share this card's number — siblings (base vs
+  // parallel vs manga, plus any release-event / tournament print of the same
+  // number). Click one to jump to its detail in the drawer.
+  const relatedPrintings = useMemo(() => {
+    if (!currentCard?.displayId) return [];
+    return catalog.filter(c => c.displayId === currentCard.displayId && c.id !== currentCard.id);
+  }, [catalog, currentCard?.displayId, currentCard?.id]);
 
-  const selected = candidates.find(v => String(v.tcg_id) === selectedPickId);
   const currentResolution = currentCid ? getResolution(currentCid) : null;
-  const currentDiagnostic = currentCard ? diagnoseResolution(currentCard, currentResolution) : null;
   const currentReport = currentCid ? getMatchReport(currentCid) : null;
   const [reportNote, setReportNote] = useState('');
   // Reset note input when the user moves to a different card.
   useEffect(() => { setReportNote(''); }, [currentCid]);
 
-  // Queues where a resolved card disappears from the list.
-  const isRemovalQueue = filterMode === 'unresolved' || filterMode === 'issues' || filterMode === 'reported';
-
-  const handleSave = () => {
-    if (selected && currentCard) {
-      // Manual save = the user confirming this printing. Marks it confirmed so
-      // it leaves the Issues queue even if the heuristic still flags a mismatch.
-      saveResolution(currentCid, selected, { confirmed: true });
-      // Saving a new pick implicitly resolves the report — clear it.
-      if (currentReport) clearMatchReport(currentCid);
-      setResolveRev(r => r + 1);
-      // In removal queues the saved card usually drops out and the next one
-      // slides into this index, so we hold the index. But a save doesn't
-      // always remove the card: in the Issues queue the only available
-      // printing may still mismatch the set/parallel flag or have no price,
-      // so the card keeps qualifying. Re-check the queue predicate against
-      // the just-saved state (Map + report store are updated synchronously);
-      // if the card is still in this queue, advance so the user isn't stuck.
-      const stillQualifies =
-        filterMode === 'unresolved' ? !isResolved(currentCard)
-        : filterMode === 'issues' ? hasIssues(currentCard)
-        : filterMode === 'reported' ? isReported(currentCard)
-        : false;
-      if (!isRemovalQueue || stillQualifies) setIndex(i => i + 1);
-    } else {
-      setIndex(i => i + 1);
-    }
-  };
-  const handleSkip = () => setIndex(i => i + 1);
+  const handleNext = () => setIndex(i => i + 1);
   const handleBack = () => setIndex(i => Math.max(0, i - 1));
   const handleReport = () => {
     if (!currentCard) return;
@@ -3392,9 +3315,9 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
           <div className="op-eyebrow">Catalog browser</div>
           <h1 className="op-page-title">Catalog</h1>
           <div className="op-page-sub">
-            Browse every TCGPlayer printing, override the picked printing on
-            any card, manage variant-detection rules, and review cards you've
-            flagged.
+            Browse every TCGPlayer printing, jump between related printings
+            of the same card number, manage variant-detection rules, and
+            review cards you've flagged.
           </div>
           {getHydratedResolutionCount() >= 0 && (
             <div className="op-page-sub" style={{ marginTop: 4 }}>
@@ -3474,198 +3397,88 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
                   {currentCard.name}
                   <VariantPill variant={currentCard.variant} />
                 </div>
-                <div className="op-resolve-side-sub">
-                  {currentCard.setName}{currentCard.originalSetId && currentCard.originalSetId !== currentCard.setId ? ` (orig ${currentCard.originalSetId})` : ''}
-                </div>
+                <div className="op-resolve-side-sub">{currentCard.setName}</div>
                 <div className="op-resolve-side-sub">
                   {RARITY_LABELS[currentCard.rarity] || currentCard.rarity}
                   {attrsOf(currentCard).map(k => ` · ${attrLabel(k)}`).join('')}
                 </div>
                 <div className="op-resolve-side-sub">
-                  Raw: ${effectiveRawPrice(currentCard).toFixed(2)}
+                  Market: ${effectiveRawPrice(currentCard).toFixed(2)}
                 </div>
-              </div>
-            </div>
-
-            <div className="op-resolve-side">
-              <div className="op-eyebrow">TCGPlayer pick</div>
-              <div className="op-resolve-art">
-                {selected?.image_url
-                  ? <img src={selected.image_url} alt={selected.name} className="op-card-art-img" />
-                  : <div className="op-card-art-fallback"><ImageOff size={28} opacity={0.4} /></div>}
-              </div>
-              <div className="op-resolve-side-meta">
-                {selected ? (
-                  <>
-                    <div className="op-resolve-side-name">
-                      {selected.name}
-                      {attrsOf(selected).map(k => (
-                        <span key={k} className="op-variant-pill">{attrLabel(k)}</span>
-                      ))}
-                    </div>
-                    <div className="op-resolve-side-sub">
-                      {selected.group_abbreviation || '?'}{selected.group_name ? ` · ${selected.group_name}` : ''}
-                    </div>
-                    <div className="op-resolve-side-sub">
-                      {selected.rarity || '?'} · {selected.sub_type_name || '?'}
-                    </div>
-                    <div className="op-resolve-side-sub">
-                      Market: {selected.market_price != null ? `$${Number(selected.market_price).toFixed(2)}` : '—'}
-                      {selected.low_price != null && (
-                        <> · L/M/H ${Number(selected.low_price).toFixed(2)}/${Number(selected.mid_price).toFixed(2)}/${Number(selected.high_price).toFixed(2)}</>
-                      )}
-                    </div>
-                    {selected.tcgplayer_url && (
-                      <a className="op-resolve-side-link" href={selected.tcgplayer_url} target="_blank" rel="noreferrer">
-                        Open on TCGPlayer ↗
-                      </a>
-                    )}
-                  </>
-                ) : (
-                  <div className="op-resolve-side-sub">Pick a candidate below.</div>
+                {currentCard.tcgplayerUrl && (
+                  <a className="op-resolve-side-link" href={currentCard.tcgplayerUrl} target="_blank" rel="noreferrer">
+                    Open on TCGPlayer ↗
+                  </a>
                 )}
               </div>
             </div>
           </div>
 
-          <Field label={`TCGPlayer printing (${candidates.length} candidate${candidates.length === 1 ? '' : 's'})`}>
-            {loading ? (
-              <div className="op-resolve-side-sub">Loading matches…</div>
-            ) : candidates.length === 0 ? (
-              <div className="op-resolve-side-sub">No TCGCSV matches — check the card number or use the manual search elsewhere.</div>
+          <Field label={`Related printings (${relatedPrintings.length} other${relatedPrintings.length === 1 ? '' : 's'} for ${currentCard.displayId || currentCard.id})`}>
+            {relatedPrintings.length === 0 ? (
+              <div className="op-resolve-side-sub">No other printings of this card number in the catalog.</div>
             ) : (
               <div className="op-resolve-candidates">
-                {candidates.map(v => {
-                  const isPicked = String(v.tcg_id) === selectedPickId;
-                  const setMatch = v.group_abbreviation &&
-                    v.group_abbreviation.replace(/-/g, '').toUpperCase() === (currentCard.setId || '').replace(/-/g, '').toUpperCase();
-                  const cardAttrs = new Set(attrsOf(currentCard));
-                  const prodAttrs = new Set(attrsOf(v));
-                  // Render one tag per attribute key present on EITHER side,
-                  // color-coded by whether catalog and product agree.
-                  const relevantKeys = [...new Set([...cardAttrs, ...prodAttrs])];
-                  return (
-                    <button
-                      key={v.tcg_id}
-                      type="button"
-                      className={`op-resolve-candidate ${isPicked ? 'is-active' : ''}`}
-                      onClick={() => setSelectedPickId(String(v.tcg_id))}
-                    >
-                      <div className="op-resolve-candidate-name">{v.name}</div>
-                      <div className="op-resolve-candidate-meta">
-                        <span className={`op-resolve-candidate-tag ${setMatch ? 'is-ok' : 'is-warn'}`}>
-                          {v.group_abbreviation || '?'}{v.group_name ? ` — ${v.group_name}` : ''}
-                        </span>
-                        {relevantKeys.length === 0 ? (
-                          <span className="op-resolve-candidate-tag is-ok">Base</span>
-                        ) : relevantKeys.map(k => {
-                          const ok = cardAttrs.has(k) === prodAttrs.has(k);
-                          const label = prodAttrs.has(k) ? attrLabel(k) : `Not ${attrLabel(k).toLowerCase()}`;
-                          return (
-                            <span key={k} className={`op-resolve-candidate-tag ${ok ? 'is-ok' : 'is-warn'}`}>
-                              {label}
-                            </span>
-                          );
-                        })}
-                        <span className="op-resolve-candidate-tag">
-                          {v.rarity || '?'}
-                          {v.sub_type_name && v.sub_type_name !== 'Normal' ? ` · ${v.sub_type_name}` : ''}
-                        </span>
-                        <span className="op-resolve-candidate-price">
-                          {v.market_price != null ? `$${Number(v.market_price).toFixed(2)}` : 'no price'}
-                        </span>
-                      </div>
-                    </button>
-                  );
-                })}
+                {relatedPrintings.map(rp => (
+                  <button
+                    key={rp.id}
+                    type="button"
+                    className="op-resolve-candidate"
+                    onClick={() => onCardClick(rp)}
+                    title="Open this printing's detail"
+                  >
+                    <div className="op-resolve-candidate-name">{rp.name}</div>
+                    <div className="op-resolve-candidate-meta">
+                      <span className="op-resolve-candidate-tag">
+                        {rp.setId || '?'}{rp.setName && rp.setName !== rp.setId ? ` — ${rp.setName}` : ''}
+                      </span>
+                      {attrsOf(rp).length === 0 ? (
+                        <span className="op-resolve-candidate-tag is-ok">Base</span>
+                      ) : attrsOf(rp).map(k => (
+                        <span key={k} className="op-resolve-candidate-tag is-ok">{attrLabel(k)}</span>
+                      ))}
+                      <span className="op-resolve-candidate-tag">{rp.rarity || '?'}</span>
+                      <span className="op-resolve-candidate-price">
+                        {rp.marketPrice > 0 ? `$${Number(rp.marketPrice).toFixed(2)}` : '—'}
+                      </span>
+                    </div>
+                  </button>
+                ))}
               </div>
             )}
           </Field>
 
-              {/* Diagnostics: surfaces why this card is in the queue / what's
-                  off about its current resolution. Only shown when there IS
-                  an existing resolution to evaluate. */}
-              {currentDiagnostic?.resolved && (
-                <div className={`op-resolve-diag ${currentDiagnostic.issues.length > 0 && !currentResolution?.confirmed ? 'has-issues' : 'is-ok'}`}>
-                  <div className="op-resolve-diag-head">Current resolution</div>
-                  {currentResolution?.confirmed && (
-                    <div className="op-resolve-diag-row">
-                      <span>Status</span>
-                      <strong>✓ confirmed by you</strong>
-                    </div>
-                  )}
-                  <div className="op-resolve-diag-row">
-                    <span>TCGPlayer pick</span>
-                    <strong>{currentResolution?.name || '(unnamed)'}</strong>
-                  </div>
-                  <div className="op-resolve-diag-row">
-                    <span>Set match</span>
-                    <strong className={currentDiagnostic.setMatch === false ? 'is-warn' : ''}>
-                      {currentDiagnostic.setMatch === true ? '✓ same set'
-                       : currentDiagnostic.setMatch === false ? `✗ ${currentResolution?.group_abbreviation || '?'} ≠ ${(currentCard.setId || '').replace(/-/g, '')}`
-                       : '—'}
-                    </strong>
-                  </div>
-                  {(currentDiagnostic.attributeMatches || []).map(m => {
-                    const cardHas = attrsOf(currentCard).includes(m.key);
-                    const pickHas = attrsOf(currentResolution).includes(m.key);
-                    return (
-                      <div key={m.key} className="op-resolve-diag-row">
-                        <span>{m.label} match</span>
-                        <strong className={!m.ok ? 'is-warn' : ''}>
-                          {m.ok
-                            ? (cardHas ? `✓ both ${m.label.toLowerCase()}` : `✓ neither ${m.label.toLowerCase()}`)
-                            : `✗ catalog ${cardHas ? 'is' : 'is not'} ${m.label.toLowerCase()} · pick ${pickHas ? 'is' : 'is not'}`}
-                        </strong>
-                      </div>
-                    );
-                  })}
-                  <div className="op-resolve-diag-row">
-                    <span>Market price</span>
-                    <strong className={!currentDiagnostic.hasPrice ? 'is-warn' : ''}>
-                      {currentDiagnostic.hasPrice ? '✓ cached' : '✗ none yet'}
-                    </strong>
-                  </div>
-                  {currentReport && (
-                    <div className="op-resolve-diag-report">
-                      <strong>⚑ You reported this</strong> on {new Date(currentReport.reported_at).toLocaleDateString()}
-                      {currentReport.note && <> — "{currentReport.note}"</>}
-                      {currentReport.pick_at_report && currentReport.pick_at_report.tcg_id !== currentResolution?.tcg_id && (
-                        <> · was pointing at <em>{currentReport.pick_at_report.name}</em></>
-                      )}
-                      <button className="op-btn-ghost" style={{ marginLeft: 8, padding: '2px 8px' }} onClick={handleClearReport}>
-                        Clear flag
-                      </button>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {!currentReport && (
-                <details className="op-resolve-report">
-                  <summary>Report this match as wrong</summary>
-                  <div style={{ marginTop: 6, display: 'flex', gap: 6, alignItems: 'center' }}>
-                    <input
-                      type="text"
-                      placeholder="(optional) what's wrong — e.g. 'this is the alt art, not the base'"
-                      value={reportNote}
-                      onChange={(e) => setReportNote(e.target.value)}
-                      style={{ flex: 1, padding: '6px 10px', border: '1px solid var(--line-strong)', background: 'var(--paper)' }}
-                    />
-                    <button className="op-btn-ghost" onClick={handleReport}>Flag</button>
-                  </div>
-                </details>
-              )}
-
-          {error && <div className="op-graded-error">{error}</div>}
+          {currentReport ? (
+            <div className="op-resolve-diag has-issues">
+              <div className="op-resolve-diag-report">
+                <strong>⚑ You reported this</strong> on {new Date(currentReport.reported_at).toLocaleDateString()}
+                {currentReport.note && <> — "{currentReport.note}"</>}
+                <button className="op-btn-ghost" style={{ marginLeft: 8, padding: '2px 8px' }} onClick={handleClearReport}>
+                  Clear flag
+                </button>
+              </div>
+            </div>
+          ) : (
+            <details className="op-resolve-report">
+              <summary>Report this card as wrong</summary>
+              <div style={{ marginTop: 6, display: 'flex', gap: 6, alignItems: 'center' }}>
+                <input
+                  type="text"
+                  placeholder="(optional) what's wrong — e.g. 'wrong art' or 'missing classification'"
+                  value={reportNote}
+                  onChange={(e) => setReportNote(e.target.value)}
+                  style={{ flex: 1, padding: '6px 10px', border: '1px solid var(--line-strong)', background: 'var(--paper)' }}
+                />
+                <button className="op-btn-ghost" onClick={handleReport}>Flag</button>
+              </div>
+            </details>
+          )}
 
           <div className="op-resolve-actions">
             <button className="op-btn-ghost" onClick={handleBack} disabled={index === 0}>← Back</button>
-            <button className="op-btn-ghost" onClick={handleSkip}>Skip</button>
-            <button className="op-btn-primary" onClick={handleSave} disabled={!selected || loading}>
-              Save &amp; Next →
-            </button>
+            <button className="op-btn-ghost" onClick={() => onCardClick(currentCard)}>Open detail</button>
             <button className="op-btn-ghost" onClick={() => onAddCard(currentCard)}>Add to collection</button>
+            <button className="op-btn-primary" onClick={handleNext} disabled={index >= queue.length - 1}>Next →</button>
           </div>
         </div>
       )}
