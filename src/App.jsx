@@ -335,15 +335,14 @@ export default function App() {
       alert('No PSA-graded entries to refresh. (Entries marked as a manual override are skipped.)');
       return;
     }
-    setGradedRefresh({ running: true, done: 0, total: targets.length, updated: 0, noData: 0, skipped: 0, error: 0 });
+    setGradedRefresh({ running: true, done: 0, total: targets.length, updated: 0, noData: 0, skipped: 0, error: 0, breakdown: { psaHasNothing: 0, windowEmpty: 0, gradeMissed: 0 } });
     const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
     let updated = 0, noData = 0, errCount = 0;
+    const breakdown = { psaHasNothing: 0, windowEmpty: 0, gradeMissed: 0 };
+    const sample = []; // first few no-data entries for the console log
     for (const entry of targets) {
       try {
-        // Resolve SpecID if missing — needs a cert lookup. Stamp it on the
-        // entry even if the APR lookup later fails so we don't redo the
-        // cert call next refresh.
         let specId = entry.psa_spec_id;
         let specPatch = null;
         if (!specId) {
@@ -367,12 +366,18 @@ export default function App() {
             await store.update('entries', entry.id, patch);
             setEntries(prev => prev.map(e => e.id === entry.id ? { ...e, ...patch } : e));
             updated++;
-          } else if (specPatch) {
-            // No APR data but we did learn the SpecID — save it.
-            await store.update('entries', entry.id, specPatch);
-            setEntries(prev => prev.map(e => e.id === entry.id ? { ...e, ...specPatch } : e));
-            noData++;
           } else {
+            // Diagnose why no suggestion came back. The three buckets answer
+            // "is PSA APR empty for this game?" vs "is the window too tight?"
+            // vs "is the grade just not represented?".
+            if ((apr?.upstream_total || 0) === 0) breakdown.psaHasNothing++;
+            else if ((apr?.in_window_total || 0) === 0) breakdown.windowEmpty++;
+            else breakdown.gradeMissed++;
+            if (sample.length < 5) sample.push({ entry_id: entry.id, spec_id: specId, grade: entry.grade, upstream_total: apr?.upstream_total, in_window_total: apr?.in_window_total, grade_breakdown: apr?.grade_breakdown });
+            if (specPatch) {
+              await store.update('entries', entry.id, specPatch);
+              setEntries(prev => prev.map(e => e.id === entry.id ? { ...e, ...specPatch } : e));
+            }
             noData++;
           }
         }
@@ -380,9 +385,11 @@ export default function App() {
         console.warn('[graded-refresh] entry failed', entry.id, e);
         errCount++;
       }
-      // Polite delay — PSA's API doesn't love bursts.
       await sleep(500);
-      setGradedRefresh(prev => prev ? { ...prev, done: prev.done + 1, updated, noData, error: errCount } : null);
+      setGradedRefresh(prev => prev ? { ...prev, done: prev.done + 1, updated, noData, error: errCount, breakdown: { ...breakdown } } : null);
+    }
+    if (sample.length > 0) {
+      console.info('[graded-refresh] sample of no-data responses:', sample);
     }
     setGradedRefresh(prev => prev ? { ...prev, running: false } : null);
   }, [entries]);
@@ -1002,6 +1009,16 @@ function CollectionView({ collection, entries, transactions = [], catalogIndex, 
               {gradedRefresh.error > 0 && ` · ${gradedRefresh.error} failed (see console)`}
             </strong>
           </div>
+          {gradedRefresh.breakdown && gradedRefresh.noData > 0 && (
+            <div className="op-resolve-diag-row">
+              <span>Why "no PSA APR data"</span>
+              <strong style={{ fontWeight: 400 }}>
+                {gradedRefresh.breakdown.psaHasNothing > 0 && `${gradedRefresh.breakdown.psaHasNothing} PSA has no sales at all`}
+                {gradedRefresh.breakdown.windowEmpty > 0 && ` · ${gradedRefresh.breakdown.windowEmpty} only older than 365d`}
+                {gradedRefresh.breakdown.gradeMissed > 0 && ` · ${gradedRefresh.breakdown.gradeMissed} sales at other grades only`}
+              </strong>
+            </div>
+          )}
         </div>
       )}
 
