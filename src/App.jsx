@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo, useRef, useCallback, useReducer } from 'react';
+// (useCallback used by refreshGradedPrices below)
 import { Search, Plus, X, TrendingUp, TrendingDown, Folder, Trash2, DollarSign, Anchor, ChevronRight, Package, BarChart3, RefreshCw, Cloud, HardDrive, ImageOff, Award, Loader2, Pencil, Eye, EyeOff } from 'lucide-react';
 import { store, MODE, VAULT_LABEL, getLastStoreError } from './storage.js';
 import { loadCatalog, groupBySet, compareSets, augmentWithErrata, hasPreErrata, togglePreErrata } from './catalog.js';
@@ -311,6 +312,81 @@ export default function App() {
     if (created) setTransactions(prev => [...prev, created]);
   };
 
+  // Backfill PSA APR prices for existing graded entries. Walks every entry
+  // with grading_company='PSA' + cert_number, fetching the SpecID first (if
+  // not already on the row) and then the APR median. Skips entries the user
+  // explicitly typed (`graded_price_source = 'manual'`). Polite to PSA's API
+  // with concurrency-1 and a small inter-call delay; on ~50 entries it's
+  // ~70s total. Per-entry results are accumulated in `gradedRefresh` for the
+  // progress UI.
+  const [gradedRefresh, setGradedRefresh] = useState(null); // { running, done, total, updated, noData, skipped, error } | null
+
+  const refreshGradedPrices = useCallback(async () => {
+    if (!hasPsaToken()) {
+      alert('PSA token missing — set VITE_PSA_TOKEN to use APR refresh.');
+      return;
+    }
+    const targets = entries.filter(e =>
+      (e.grading_company || '').toUpperCase() === 'PSA' &&
+      e.cert_number &&
+      e.graded_price_source !== 'manual'
+    );
+    if (targets.length === 0) {
+      alert('No PSA-graded entries to refresh. (Entries marked as a manual override are skipped.)');
+      return;
+    }
+    setGradedRefresh({ running: true, done: 0, total: targets.length, updated: 0, noData: 0, skipped: 0, error: 0 });
+    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+    let updated = 0, noData = 0, errCount = 0;
+    for (const entry of targets) {
+      try {
+        // Resolve SpecID if missing — needs a cert lookup. Stamp it on the
+        // entry even if the APR lookup later fails so we don't redo the
+        // cert call next refresh.
+        let specId = entry.psa_spec_id;
+        let specPatch = null;
+        if (!specId) {
+          const cert = await fetchCert(entry.cert_number);
+          if (cert?.spec_id) {
+            specId = String(cert.spec_id);
+            specPatch = { psa_spec_id: specId };
+          }
+        }
+        if (!specId) {
+          errCount++;
+        } else {
+          const apr = await fetchAuctionPrices({ specId, grade: entry.grade });
+          if (apr?.suggested_price != null) {
+            const patch = {
+              ...(specPatch || {}),
+              graded_price: Number(apr.suggested_price),
+              graded_price_source: 'psa-apr',
+              graded_price_fetched_at: new Date().toISOString(),
+            };
+            await store.update('entries', entry.id, patch);
+            setEntries(prev => prev.map(e => e.id === entry.id ? { ...e, ...patch } : e));
+            updated++;
+          } else if (specPatch) {
+            // No APR data but we did learn the SpecID — save it.
+            await store.update('entries', entry.id, specPatch);
+            setEntries(prev => prev.map(e => e.id === entry.id ? { ...e, ...specPatch } : e));
+            noData++;
+          } else {
+            noData++;
+          }
+        }
+      } catch (e) {
+        console.warn('[graded-refresh] entry failed', entry.id, e);
+        errCount++;
+      }
+      // Polite delay — PSA's API doesn't love bursts.
+      await sleep(500);
+      setGradedRefresh(prev => prev ? { ...prev, done: prev.done + 1, updated, noData, error: errCount } : null);
+    }
+    setGradedRefresh(prev => prev ? { ...prev, running: false } : null);
+  }, [entries]);
+
   const addEntry = async (entry) => {
     const created = await store.insert('entries', {
       ...entry,
@@ -483,6 +559,8 @@ export default function App() {
             variantRev={variantRev}
             onSearchClick={() => setView('search')}
             onAddByCertClick={hasPsaToken() ? () => setAddByCertOpen(true) : null}
+            onRefreshGradedPrices={hasPsaToken() ? refreshGradedPrices : null}
+            gradedRefresh={gradedRefresh}
             onCardClick={(card) => setDetailCard(card)}
             onRemoveEntry={removeEntry}
             onSellEntry={(entry) => setSellingEntry(entry)}
@@ -781,7 +859,7 @@ function ModeIndicator() {
 }
 
 // ============================================================================
-function CollectionView({ collection, entries, transactions = [], catalogIndex, variantRev = 0, onSearchClick, onAddByCertClick, onCardClick, onRemoveEntry, onSellEntry = () => {}, onExpenseEntry = () => {}, onEditEntry = () => {}, onUpdateMembers }) {
+function CollectionView({ collection, entries, transactions = [], catalogIndex, variantRev = 0, onSearchClick, onAddByCertClick, onRefreshGradedPrices, gradedRefresh, onCardClick, onRemoveEntry, onSellEntry = () => {}, onExpenseEntry = () => {}, onEditEntry = () => {}, onUpdateMembers }) {
   const members = Array.isArray(collection?.members) ? collection.members : [];
   const isSynthetic = Boolean(collection?.synthetic);
   const [entrySort, setEntrySort] = useStoredState('optcg:collection:entrySort', 'recent');
@@ -888,6 +966,21 @@ function CollectionView({ collection, entries, transactions = [], catalogIndex, 
           <div className="op-page-sub">{stats.count} {stats.count === 1 ? 'card' : 'cards'} logged in this collection</div>
         </div>
         <div className="op-page-head-actions">
+          {onRefreshGradedPrices && (
+            <button
+              className="op-btn-ghost"
+              onClick={onRefreshGradedPrices}
+              disabled={gradedRefresh?.running}
+              title="Look up the latest PSA Auction Prices Realized for every PSA-graded entry. Manually-entered prices are preserved."
+            >
+              {gradedRefresh?.running
+                ? <Loader2 size={15} className="op-spin" />
+                : <RefreshCw size={15} />}
+              {gradedRefresh?.running
+                ? ` Refreshing ${gradedRefresh.done}/${gradedRefresh.total}…`
+                : ' Refresh graded prices'}
+            </button>
+          )}
           {onAddByCertClick && (
             <button className="op-btn-ghost" onClick={onAddByCertClick} title="Add a PSA-graded card by entering its cert number">
               <Award size={15} /> Add by cert
@@ -898,6 +991,19 @@ function CollectionView({ collection, entries, transactions = [], catalogIndex, 
           </button>
         </div>
       </div>
+
+      {gradedRefresh && !gradedRefresh.running && (gradedRefresh.updated > 0 || gradedRefresh.noData > 0 || gradedRefresh.error > 0) && (
+        <div className="op-resolve-diag is-ok" style={{ marginTop: 8 }}>
+          <div className="op-resolve-diag-row">
+            <span>Last graded refresh</span>
+            <strong>
+              ✓ {gradedRefresh.updated} updated
+              {gradedRefresh.noData > 0 && ` · ${gradedRefresh.noData} with no PSA APR data`}
+              {gradedRefresh.error > 0 && ` · ${gradedRefresh.error} failed (see console)`}
+            </strong>
+          </div>
+        </div>
+      )}
 
       {!isSynthetic && onUpdateMembers && (
         <MembersPanel members={members} onUpdate={onUpdateMembers} />
