@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useRef, useCallback, useReducer } from 'react';
 // (useCallback used by refreshGradedPrices below)
-import { Search, Plus, X, TrendingUp, TrendingDown, Folder, Trash2, DollarSign, Anchor, ChevronRight, Package, BarChart3, RefreshCw, Cloud, HardDrive, ImageOff, Award, Loader2, Pencil, Eye, EyeOff } from 'lucide-react';
+import { Search, Plus, X, TrendingUp, TrendingDown, Folder, Trash2, DollarSign, Anchor, ChevronRight, Package, BarChart3, RefreshCw, Cloud, HardDrive, ImageOff, Award, Loader2, Pencil, Eye, EyeOff, Receipt, ExternalLink } from 'lucide-react';
 import { store, MODE, VAULT_LABEL, getLastStoreError } from './storage.js';
 import { loadCatalog, groupBySet, compareSets, augmentWithErrata, hasPreErrata, togglePreErrata } from './catalog.js';
 import { hasPsaToken, fetchCert, fetchAuctionPrices, findCandidateCards } from './psa.js';
@@ -143,7 +143,12 @@ export default function App() {
   const [entries, setEntries] = useState([]);
   const [transactions, setTransactions] = useState([]);
   const [watchlist, setWatchlist] = useState([]);
+  const [sales, setSales] = useState([]); // observed market sales (Sales tab)
   const [loading, setLoading] = useState(true);
+
+  // Modal state for "Log a sale" — null when closed, otherwise { card } (pre-
+  // filled card to log against, or null/{} for a generic open).
+  const [logSaleFor, setLogSaleFor] = useState(null);
 
   const [view, setView] = useState('collection');
   const [activeCollectionId, setActiveCollectionId] = useState(null);
@@ -179,11 +184,12 @@ export default function App() {
 
   // Load user data
   const refreshData = useCallback(async () => {
-    const [cols, ents, txs, watches] = await Promise.all([
+    const [cols, ents, txs, watches, salesRows] = await Promise.all([
       store.list('collections'),
       store.list('entries'),
       store.list('transactions').catch(() => []),
       store.list('watchlist').catch(() => []),
+      store.list('sales').catch(() => []),
     ]);
     let cs = cols;
     if (cs.length === 0) {
@@ -194,6 +200,7 @@ export default function App() {
     setEntries(ents);
     setTransactions(txs);
     setWatchlist(watches);
+    setSales(salesRows);
     setActiveCollectionId(prev => prev || cs[0]?.id || null);
   }, []);
 
@@ -226,7 +233,8 @@ export default function App() {
     const unsubE = store.subscribe('entries', refreshData);
     const unsubT = store.subscribe('transactions', refreshData);
     const unsubW = store.subscribe('watchlist', refreshData);
-    return () => { unsubC(); unsubE(); unsubT(); unsubW(); };
+    const unsubS = store.subscribe('sales', refreshData);
+    return () => { unsubC(); unsubE(); unsubT(); unsubW(); unsubS(); };
   }, [refreshData]);
 
   // erratTick bumps whenever the user toggles a pre-errata mark so the
@@ -312,114 +320,133 @@ export default function App() {
     if (created) setTransactions(prev => [...prev, created]);
   };
 
-  // Backfill PSA APR prices for existing graded entries. Walks every entry
-  // with grading_company='PSA' + cert_number, fetching the SpecID first (if
-  // not already on the row) and then the APR median. Skips entries the user
-  // explicitly typed (`graded_price_source = 'manual'`). Polite to PSA's API
-  // with concurrency-1 and a small inter-call delay; on ~50 entries it's
-  // ~70s total. Per-entry results are accumulated in `gradedRefresh` for the
-  // progress UI.
-  const [gradedRefresh, setGradedRefresh] = useState(null); // { running, done, total, updated, noData, skipped, error } | null
+  // -----------------------------------------------------------------------
+  // Sales log (observed market sales) — the user-built dataset that feeds the
+  // graded-pricing estimator. These are arms-length sales the user spots in
+  // the wild (eBay, Whatnot, Discord listings, TCGPlayer marketplace, etc.);
+  // the user's own portfolio sells live in `transactions(type='sell')`.
+  // -----------------------------------------------------------------------
+  const addSale = async (sale) => {
+    const created = await store.insert('sales', {
+      ...sale,
+      id: uid(),
+      created_at: new Date().toISOString(),
+      source: sale.source || 'manual',
+    });
+    if (created) {
+      setSales(prev => [...prev, created]);
+    } else {
+      const err = getLastStoreError();
+      const detail = err
+        ? `${err.code || ''} ${err.message || ''}${err.details ? ` · ${err.details}` : ''}${err.hint ? ` · hint: ${err.hint}` : ''}`.trim()
+        : '';
+      alert(`Couldn't save the sale to Supabase.${detail ? `\n\n${detail}` : ''}\n\nMost common cause: the sales table hasn't been created yet. The migration SQL is documented at the top of src/storage.js.`);
+    }
+    return created;
+  };
+
+  const updateSale = async (id, patch) => {
+    const updated = await store.update('sales', id, patch);
+    if (updated) setSales(prev => prev.map(s => s.id === id ? updated : s));
+    return updated;
+  };
+
+  const removeSale = async (id) => {
+    await store.remove('sales', id);
+    setSales(prev => prev.filter(s => s.id !== id));
+  };
+
+  // estimateGradedPrice — median of matching sales in the recency window.
+  // Pure read; no side effects. Matches on canonical card_id +
+  // grading_company + grade (with optional bgs_black distinction so BGS 10
+  // Black Label doesn't get averaged with regular BGS 10). Returns null
+  // when there are no matching sales.
+  const estimateGradedPrice = (cardId, gradingCompany, grade, { days = 180, bgsBlack = null } = {}) => {
+    if (!cardId || !gradingCompany || grade == null) return null;
+    const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+    const company = String(gradingCompany).toUpperCase();
+    const matches = sales.filter(s => {
+      if (s.card_id !== cardId) return false;
+      if ((s.grading_company || '').toUpperCase() !== company) return false;
+      if (Number(s.grade) !== Number(grade)) return false;
+      if (bgsBlack !== null && Boolean(s.bgs_black) !== Boolean(bgsBlack)) return false;
+      const t = s.sale_date ? Date.parse(s.sale_date) : 0;
+      return Number.isFinite(t) && t >= cutoff;
+    });
+    if (matches.length === 0) return null;
+    const prices = matches.map(s => Number(s.sale_price)).filter(p => p > 0).sort((a, b) => a - b);
+    if (prices.length === 0) return null;
+    const mid = Math.floor(prices.length / 2);
+    const median = prices.length % 2 === 0 ? (prices[mid - 1] + prices[mid]) / 2 : prices[mid];
+    return {
+      price: median,
+      sampleCount: prices.length,
+      low: prices[0],
+      high: prices[prices.length - 1],
+      mostRecentSaleAt: matches.map(s => s.sale_date).sort().pop() || null,
+      window_days: days,
+    };
+  };
+
+  // Refresh graded prices from the user's own sales log — no external API,
+  // no quotas. For each graded entry that isn't a manual override, runs
+  // estimateGradedPrice over `sales` and writes graded_price +
+  // graded_price_source='sales-log' + graded_price_fetched_at. Entries
+  // with no matching sales are reported as "no data" and left untouched.
+  const [gradedRefresh, setGradedRefresh] = useState(null); // { running, done, total, updated, noData, skipped, error, breakdown } | null
 
   const refreshGradedPrices = useCallback(async () => {
-    if (!hasPsaToken()) {
-      alert('PSA token missing — set VITE_PSA_TOKEN to use APR refresh.');
-      return;
-    }
-    // Skip entries we already refreshed within the last 24h. PSA's free
-    // tier is 100 calls/day and a single full sweep on a ~34-entry
-    // collection already busts it; the skip avoids double-burning when
-    // the user clicks Refresh twice. Manual entries are also skipped so
-    // an explicit override isn't clobbered.
-    const FRESH_MS = 24 * 60 * 60 * 1000;
-    const now = Date.now();
     const allCandidates = entries.filter(e =>
-      (e.grading_company || '').toUpperCase() === 'PSA' &&
-      e.cert_number &&
+      e.grading_company &&
+      e.grade != null &&
       e.graded_price_source !== 'manual'
     );
-    const targets = allCandidates.filter(e => {
-      const t = e.graded_price_fetched_at ? Date.parse(e.graded_price_fetched_at) : 0;
-      return !(t && now - t < FRESH_MS);
-    });
-    const skippedFresh = allCandidates.length - targets.length;
-    if (targets.length === 0) {
-      alert(`Nothing to refresh — ${allCandidates.length} PSA-graded entries are all already fresh (<24h old) or marked manual.`);
+    if (allCandidates.length === 0) {
+      alert('No graded entries to refresh. (Entries marked as a manual override are skipped.)');
       return;
     }
-    if (skippedFresh > 0) {
-      console.info(`[graded-refresh] skipping ${skippedFresh} entries refreshed within the last 24h`);
-    }
-    setGradedRefresh({ running: true, done: 0, total: targets.length, updated: 0, noData: 0, skipped: skippedFresh, error: 0, breakdown: { psaHasNothing: 0, windowEmpty: 0, gradeMissed: 0, quotaExceeded: 0 } });
-    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+    setGradedRefresh({ running: true, done: 0, total: allCandidates.length, updated: 0, noData: 0, skipped: 0, error: 0, breakdown: { noSales: 0 } });
 
     let updated = 0, noData = 0, errCount = 0;
-    const breakdown = { psaHasNothing: 0, windowEmpty: 0, gradeMissed: 0, quotaExceeded: 0 };
-    const sample = []; // first few no-data entries for the console log
-    for (const entry of targets) {
+    const breakdown = { noSales: 0 };
+    const sample = [];
+    for (const entry of allCandidates) {
       try {
-        let specId = entry.psa_spec_id;
-        let specPatch = null;
-        if (!specId) {
-          const cert = await fetchCert(entry.cert_number);
-          if (cert?.spec_id) {
-            specId = String(cert.spec_id);
-            specPatch = { psa_spec_id: specId };
-          }
-        }
-        if (!specId) {
-          errCount++;
+        const est = estimateGradedPrice(entry.card_id, entry.grading_company, entry.grade, {
+          days: 180,
+          bgsBlack: entry.bgs_black,
+        });
+        if (est) {
+          const patch = {
+            graded_price: Number(est.price.toFixed(2)),
+            graded_price_source: 'sales-log',
+            graded_price_fetched_at: new Date().toISOString(),
+          };
+          await store.update('entries', entry.id, patch);
+          setEntries(prev => prev.map(e => e.id === entry.id ? { ...e, ...patch } : e));
+          updated++;
         } else {
-          const apr = await fetchAuctionPrices({ specId, grade: entry.grade });
-          if (apr?.suggested_price != null) {
-            const patch = {
-              ...(specPatch || {}),
-              graded_price: Number(apr.suggested_price),
-              graded_price_source: 'psa-apr',
-              graded_price_fetched_at: new Date().toISOString(),
-            };
-            await store.update('entries', entry.id, patch);
-            setEntries(prev => prev.map(e => e.id === entry.id ? { ...e, ...patch } : e));
-            updated++;
-          } else {
-            // Diagnose why no suggestion came back. Four buckets answer
-            // "quota exhausted (429)?" vs "PSA has nothing for the SpecID"
-            // vs "only older sales" vs "only sales at other grades".
-            if (apr?.upstream_status === 429) breakdown.quotaExceeded++;
-            else if ((apr?.upstream_total || 0) === 0) breakdown.psaHasNothing++;
-            else if ((apr?.in_window_total || 0) === 0) breakdown.windowEmpty++;
-            else breakdown.gradeMissed++;
-            if (sample.length < 5) sample.push({
-              entry_id: entry.id,
-              spec_id: specId,
-              grade: entry.grade,
-              upstream_status: apr?.upstream_status,
-              upstream_url: apr?.upstream_url,
-              upstream_total: apr?.upstream_total,
-              in_window_total: apr?.in_window_total,
-              grade_breakdown: apr?.grade_breakdown,
-              upstream_body_sample: apr?.upstream_body_sample,
-              reason: apr?.reason,
-            });
-            if (specPatch) {
-              await store.update('entries', entry.id, specPatch);
-              setEntries(prev => prev.map(e => e.id === entry.id ? { ...e, ...specPatch } : e));
-            }
-            noData++;
-          }
+          breakdown.noSales++;
+          if (sample.length < 5) sample.push({
+            entry_id: entry.id,
+            card_id: entry.card_id,
+            grading_company: entry.grading_company,
+            grade: entry.grade,
+            reason: 'no matching sales in last 180d',
+          });
+          noData++;
         }
       } catch (e) {
         console.warn('[graded-refresh] entry failed', entry.id, e);
         errCount++;
       }
-      await sleep(500);
       setGradedRefresh(prev => prev ? { ...prev, done: prev.done + 1, updated, noData, error: errCount, breakdown: { ...breakdown } } : null);
     }
     if (sample.length > 0) {
-      console.info('[graded-refresh] sample of no-data responses:', sample);
+      console.info('[graded-refresh] entries with no matching sales:', sample);
     }
     setGradedRefresh(prev => prev ? { ...prev, running: false } : null);
-  }, [entries]);
+  }, [entries, sales]);
 
   const addEntry = async (entry) => {
     const created = await store.insert('entries', {
@@ -593,7 +620,7 @@ export default function App() {
             variantRev={variantRev}
             onSearchClick={() => setView('search')}
             onAddByCertClick={hasPsaToken() ? () => setAddByCertOpen(true) : null}
-            onRefreshGradedPrices={hasPsaToken() ? refreshGradedPrices : null}
+            onRefreshGradedPrices={refreshGradedPrices}
             gradedRefresh={gradedRefresh}
             onCardClick={(card) => setDetailCard(card)}
             onRemoveEntry={removeEntry}
@@ -656,6 +683,17 @@ export default function App() {
               else alert("Couldn't save the transaction. Check the console for the Supabase error.");
             }}
             onRemoveTransaction={removeTransaction}
+          />
+        )}
+        {view === 'sales' && (
+          <SalesView
+            sales={sales}
+            catalogIndex={catalogIndex}
+            variantRev={variantRev}
+            onAddSale={() => setLogSaleFor({})}
+            onEditSale={(s) => setLogSaleFor({ existing: s })}
+            onRemoveSale={removeSale}
+            onCardClick={setDetailCard}
           />
         )}
       </main>
@@ -726,6 +764,25 @@ export default function App() {
         );
       })()}
 
+      {logSaleFor && (
+        <LogSaleModal
+          catalog={augmentedCatalog}
+          catalogIndex={catalogIndex}
+          existing={logSaleFor.existing || null}
+          prefillCard={logSaleFor.card || null}
+          knownMarketplaces={Array.from(new Set(sales.map(s => s.marketplace).filter(Boolean))).sort()}
+          onClose={() => setLogSaleFor(null)}
+          onSave={async (payload) => {
+            if (logSaleFor.existing) {
+              await updateSale(logSaleFor.existing.id, payload);
+            } else {
+              await addSale(payload);
+            }
+            setLogSaleFor(null);
+          }}
+        />
+      )}
+
       {detailCard && (() => {
         const detailCid = detailCard.canonicalId || detailCard.id;
         return (
@@ -734,6 +791,8 @@ export default function App() {
           entries={entries.filter(e => e.card_id === detailCid)}
           collections={collections}
           watchEntry={watchlist.find(w => w.card_id === detailCid) || null}
+          recentSales={sales.filter(s => s.card_id === detailCid).sort((a, b) => (b.sale_date || '').localeCompare(a.sale_date || '')).slice(0, 12)}
+          onLogSale={() => { setLogSaleFor({ card: detailCard }); }}
           onClose={() => setDetailCard(null)}
           onAddToCollection={() => { setAddingCard(detailCard); setDetailCard(null); }}
           onRemoveEntry={removeEntry}
@@ -810,6 +869,9 @@ function Header({ view, setView, collections, activeCollectionId, setActiveColle
         </button>
         <button className={`op-nav-btn ${view === 'watch' ? 'is-active' : ''}`} onClick={() => setView('watch')}>
           <Eye size={15} /> Watch
+        </button>
+        <button className={`op-nav-btn ${view === 'sales' ? 'is-active' : ''}`} onClick={() => setView('sales')}>
+          <Receipt size={15} /> Sales
         </button>
         <button className={`op-nav-btn ${view === 'resolve' ? 'is-active' : ''}`} onClick={() => setView('resolve')}>
           <Package size={15} /> Catalog
@@ -1005,7 +1067,7 @@ function CollectionView({ collection, entries, transactions = [], catalogIndex, 
               className="op-btn-ghost"
               onClick={onRefreshGradedPrices}
               disabled={gradedRefresh?.running}
-              title="Look up the latest PSA Auction Prices Realized for every PSA-graded entry. Manually-entered prices are preserved."
+              title="Recompute graded prices from your Sales log (median of matching sales in the last 180d). Manually-entered prices are preserved."
             >
               {gradedRefresh?.running
                 ? <Loader2 size={15} className="op-spin" />
@@ -1038,19 +1100,10 @@ function CollectionView({ collection, entries, transactions = [], catalogIndex, 
           </div>
           {gradedRefresh.breakdown && gradedRefresh.noData > 0 && (
             <div className="op-resolve-diag-row">
-              <span>Why "no PSA APR data"</span>
+              <span>Why "no data"</span>
               <strong style={{ fontWeight: 400 }}>
-                {gradedRefresh.breakdown.quotaExceeded > 0 && `${gradedRefresh.breakdown.quotaExceeded} PSA daily quota exceeded (100/day) — wait ~24h`}
-                {gradedRefresh.breakdown.psaHasNothing > 0 && `${gradedRefresh.breakdown.quotaExceeded > 0 ? ' · ' : ''}${gradedRefresh.breakdown.psaHasNothing} PSA has no sales at all`}
-                {gradedRefresh.breakdown.windowEmpty > 0 && ` · ${gradedRefresh.breakdown.windowEmpty} only older than 365d`}
-                {gradedRefresh.breakdown.gradeMissed > 0 && ` · ${gradedRefresh.breakdown.gradeMissed} sales at other grades only`}
+                {gradedRefresh.breakdown.noSales || gradedRefresh.noData} entries have no matching sales in the last 180d — log one from the Sales tab.
               </strong>
-            </div>
-          )}
-          {gradedRefresh.skipped > 0 && (
-            <div className="op-resolve-diag-row">
-              <span>Skipped (fresh &lt; 24h)</span>
-              <strong style={{ fontWeight: 400 }}>{gradedRefresh.skipped}</strong>
             </div>
           )}
         </div>
@@ -4060,7 +4113,7 @@ function Field({ label, children }) {
 }
 
 // ============================================================================
-function CardDetailDrawer({ card, entries, collections, watchEntry, onClose, onAddToCollection, onRemoveEntry, onToggleErrata, onToggleWatch }) {
+function CardDetailDrawer({ card, entries, collections, watchEntry, recentSales = [], onLogSale, onClose, onAddToCollection, onRemoveEntry, onToggleErrata, onToggleWatch }) {
   const erratMarked = hasPreErrata(card.id.replace(/__pre-errata$/, ''));
   const isWatched = Boolean(watchEntry);
   // Force re-read of resolution / report state when the user takes an action
@@ -4261,6 +4314,28 @@ function CardDetailDrawer({ card, entries, collections, watchEntry, onClose, onA
             </div>
           )}
 
+          {recentSales.length > 0 && (
+            <>
+              <div className="op-section-title"><Receipt size={15} /> Recent sales for this card</div>
+              <div className="op-drawer-sales">
+                {recentSales.map(s => (
+                  <div key={s.id} className="op-drawer-sale-row">
+                    <div className="op-drawer-sale-meta">
+                      <span className="op-tag op-tag-grade">
+                        {s.grading_company || 'Raw'}{s.grade != null ? ` ${s.grade}` : ''}{s.bgs_black ? ' BLK' : ''}
+                      </span>
+                      <span className="op-tag op-tag-market">{s.marketplace}</span>
+                    </div>
+                    <div className="op-drawer-sale-side">
+                      <div className="op-drawer-sale-price">${Number(s.sale_price).toFixed(2)}</div>
+                      <div className="op-drawer-sale-date">{s.sale_date}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+
           <div className="op-drawer-actions">
             <button
               className="op-btn-ghost"
@@ -4276,6 +4351,15 @@ function CardDetailDrawer({ card, entries, collections, watchEntry, onClose, onA
             >
               {erratMarked ? 'Unmark pre-errata' : 'This card has pre-errata'}
             </button>
+            {onLogSale && (
+              <button
+                className="op-btn-ghost"
+                onClick={onLogSale}
+                title="Log an observed market sale for this card — feeds the graded-pricing estimator"
+              >
+                <Receipt size={15} /> Log a sale
+              </button>
+            )}
             <button className="op-btn-primary" onClick={onAddToCollection}>
               <Plus size={15} /> Log a copy
             </button>
@@ -4291,6 +4375,391 @@ function PriceCell({ label, value, tone, accent }) {
     <div className={`op-price-cell ${accent ? 'is-accent' : ''} ${tone ? `is-${tone}` : ''}`}>
       <div className="op-price-cell-label">{label}</div>
       <div className="op-price-cell-val">{value}</div>
+    </div>
+  );
+}
+
+// SalesView — the user-built observed-sales dataset that feeds the
+// graded-pricing estimator. Filterable by card / grading company / grade /
+// marketplace / date range, and editable per-row. Adding a sale opens
+// LogSaleModal; editing one re-opens it with the existing row's data.
+function SalesView({ sales, catalogIndex, variantRev = 0, onAddSale, onEditSale, onRemoveSale, onCardClick }) {
+  void variantRev; // catalog name changes when variants are edited; re-render
+  const [filterCard, setFilterCard] = useStoredState('op:sales:filter:q', '');
+  const [filterCompany, setFilterCompany] = useStoredState('op:sales:filter:company', 'all');
+  const [filterGrade, setFilterGrade] = useStoredState('op:sales:filter:grade', 'all');
+  const [filterMarket, setFilterMarket] = useStoredState('op:sales:filter:market', 'all');
+  const [days, setDays] = useStoredState('op:sales:filter:days', '180');
+
+  const companies = useMemo(() => Array.from(new Set(sales.map(s => s.grading_company).filter(Boolean))).sort(), [sales]);
+  const grades = useMemo(() => Array.from(new Set(sales.map(s => s.grade).filter(g => g != null).map(g => String(g)))).sort((a, b) => Number(b) - Number(a)), [sales]);
+  const markets = useMemo(() => Array.from(new Set(sales.map(s => s.marketplace).filter(Boolean))).sort(), [sales]);
+
+  const filtered = useMemo(() => {
+    const q = filterCard.trim().toLowerCase();
+    const cutoff = days === 'all' ? 0 : Date.now() - Number(days) * 24 * 60 * 60 * 1000;
+    return sales
+      .filter(s => {
+        if (filterCompany !== 'all' && (s.grading_company || '') !== filterCompany) return false;
+        if (filterGrade !== 'all' && String(s.grade) !== filterGrade) return false;
+        if (filterMarket !== 'all' && (s.marketplace || '') !== filterMarket) return false;
+        if (cutoff && s.sale_date && Date.parse(s.sale_date) < cutoff) return false;
+        if (q) {
+          const card = catalogIndex.get(s.card_id);
+          const hay = `${s.card_id} ${card?.name || ''} ${card?.displayId || ''} ${s.listing_title || ''}`.toLowerCase();
+          if (!hay.includes(q)) return false;
+        }
+        return true;
+      })
+      .sort((a, b) => (b.sale_date || '').localeCompare(a.sale_date || ''));
+  }, [sales, filterCard, filterCompany, filterGrade, filterMarket, days, catalogIndex]);
+
+  const totalValue = filtered.reduce((acc, s) => acc + (Number(s.sale_price) || 0), 0);
+
+  return (
+    <div className="op-view">
+      <div className="op-page-head">
+        <div>
+          <div className="op-eyebrow">Sales Log</div>
+          <h1 className="op-page-title">Observed Market Sales</h1>
+          <div className="op-page-sub">
+            {sales.length} {sales.length === 1 ? 'sale' : 'sales'} logged · feeds the graded-pricing estimator on the Collection view
+          </div>
+        </div>
+        <div className="op-page-head-actions">
+          <button className="op-btn-primary" onClick={onAddSale}>
+            <Plus size={16} /> Log a sale
+          </button>
+        </div>
+      </div>
+
+      <div className="op-sales-toolbar">
+        <input
+          className="op-input"
+          placeholder="Search by card, ID, or listing title…"
+          value={filterCard}
+          onChange={(e) => setFilterCard(e.target.value)}
+          style={{ flex: 1, minWidth: 220 }}
+        />
+        <select className="op-input" value={filterCompany} onChange={(e) => setFilterCompany(e.target.value)}>
+          <option value="all">All companies</option>
+          {companies.map(c => <option key={c} value={c}>{c}</option>)}
+        </select>
+        <select className="op-input" value={filterGrade} onChange={(e) => setFilterGrade(e.target.value)}>
+          <option value="all">All grades</option>
+          {grades.map(g => <option key={g} value={g}>{g}</option>)}
+        </select>
+        <select className="op-input" value={filterMarket} onChange={(e) => setFilterMarket(e.target.value)}>
+          <option value="all">All marketplaces</option>
+          {markets.map(m => <option key={m} value={m}>{m}</option>)}
+        </select>
+        <select className="op-input" value={days} onChange={(e) => setDays(e.target.value)}>
+          <option value="30">Last 30d</option>
+          <option value="90">Last 90d</option>
+          <option value="180">Last 180d</option>
+          <option value="365">Last 365d</option>
+          <option value="all">All time</option>
+        </select>
+      </div>
+
+      {filtered.length > 0 && (
+        <div className="op-sales-summary">
+          <span>{filtered.length} {filtered.length === 1 ? 'sale' : 'sales'} matching filters</span>
+          <span>Total: ${totalValue.toFixed(2)}</span>
+        </div>
+      )}
+
+      {filtered.length === 0 ? (
+        <div className="op-empty-state">
+          <div className="op-empty-icon"><Receipt size={28} /></div>
+          <div className="op-empty-title">{sales.length === 0 ? 'No sales logged yet' : 'No sales match your filters'}</div>
+          <div className="op-empty-sub">
+            {sales.length === 0
+              ? 'When you see a graded card sell, log it here. Over time these become your private graded-pricing dataset.'
+              : 'Try clearing a filter or widening the date range.'}
+          </div>
+          {sales.length === 0 && (
+            <button className="op-btn-primary" onClick={onAddSale} style={{ marginTop: 12 }}>
+              <Plus size={16} /> Log your first sale
+            </button>
+          )}
+        </div>
+      ) : (
+        <div className="op-sales-list">
+          {filtered.map(s => {
+            const card = catalogIndex.get(s.card_id);
+            const cardLabel = card ? `${card.displayId || card.id} · ${card.name}` : s.card_id;
+            return (
+              <div key={s.id} className="op-sales-row">
+                <div className="op-sales-row-main">
+                  <button
+                    className="op-sales-row-card"
+                    onClick={() => card && onCardClick && onCardClick(card)}
+                    disabled={!card}
+                    title={card ? 'Open card detail' : 'Card not in catalog'}
+                  >
+                    {cardLabel}
+                  </button>
+                  <div className="op-sales-row-meta">
+                    {s.grading_company && (
+                      <span className="op-tag op-tag-grade">
+                        {s.grading_company} {s.grade}{s.bgs_black ? ' BLK' : ''}
+                      </span>
+                    )}
+                    <span className="op-tag op-tag-market">{s.marketplace}</span>
+                    {s.cert_number && <span className="op-tag">cert {s.cert_number}</span>}
+                    {s.source && s.source !== 'manual' && <span className="op-tag">via {s.source}</span>}
+                  </div>
+                  {s.listing_title && <div className="op-sales-row-title">{s.listing_title}</div>}
+                  {s.notes && <div className="op-sales-row-notes">{s.notes}</div>}
+                </div>
+                <div className="op-sales-row-side">
+                  <div className="op-sales-row-price">${Number(s.sale_price).toFixed(2)}</div>
+                  <div className="op-sales-row-date">{s.sale_date}</div>
+                  <div className="op-sales-row-actions">
+                    {s.listing_url && (
+                      <a className="op-icon-btn" href={s.listing_url} target="_blank" rel="noreferrer" title="Open listing">
+                        <ExternalLink size={14} />
+                      </a>
+                    )}
+                    <button className="op-icon-btn" onClick={() => onEditSale(s)} title="Edit sale">
+                      <Pencil size={14} />
+                    </button>
+                    <button
+                      className="op-icon-btn op-icon-btn-danger"
+                      onClick={() => { if (confirm('Delete this sale?')) onRemoveSale(s.id); }}
+                      title="Delete sale"
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// LogSaleModal — log an observed market sale. Card picker is a typeahead
+// over the catalog; marketplace is a free-text field with autocomplete from
+// previously-used values. The same modal handles edit (`existing` row passed
+// in) and add (existing=null, optional `prefillCard`).
+function LogSaleModal({ catalog, catalogIndex, existing, prefillCard, knownMarketplaces = [], onClose, onSave }) {
+  const initialCard = existing
+    ? catalogIndex.get(existing.card_id) || null
+    : prefillCard || null;
+  const [pickedCard, setPickedCard] = useState(initialCard);
+  const [cardQuery, setCardQuery] = useState('');
+  const [showSuggestions, setShowSuggestions] = useState(false);
+
+  const [gradingCompany, setGradingCompany] = useState(existing?.grading_company || 'PSA');
+  const [grade, setGrade] = useState(existing?.grade != null ? String(existing.grade) : '10');
+  const [bgsBlack, setBgsBlack] = useState(Boolean(existing?.bgs_black));
+  const [certNumber, setCertNumber] = useState(existing?.cert_number || '');
+
+  const [saleDate, setSaleDate] = useState(existing?.sale_date || new Date().toISOString().slice(0, 10));
+  const [salePrice, setSalePrice] = useState(existing?.sale_price != null ? String(existing.sale_price) : '');
+  const [marketplace, setMarketplace] = useState(existing?.marketplace || '');
+  const [listingUrl, setListingUrl] = useState(existing?.listing_url || '');
+  const [listingTitle, setListingTitle] = useState(existing?.listing_title || '');
+  const [notes, setNotes] = useState(existing?.notes || '');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  const suggestions = useMemo(() => {
+    const q = cardQuery.trim().toLowerCase();
+    if (q.length < 2) return [];
+    return catalog
+      .filter(c => {
+        const hay = `${c.id} ${c.displayId || ''} ${c.name || ''}`.toLowerCase();
+        return hay.includes(q);
+      })
+      .slice(0, 8);
+  }, [catalog, cardQuery]);
+
+  const marketSuggestions = useMemo(() => {
+    const q = marketplace.trim().toLowerCase();
+    if (!q) return knownMarketplaces.slice(0, 6);
+    return knownMarketplaces.filter(m => m.toLowerCase().includes(q)).slice(0, 6);
+  }, [knownMarketplaces, marketplace]);
+
+  const canSave = pickedCard && Number(salePrice) > 0 && saleDate && marketplace.trim();
+
+  const handleSave = async () => {
+    if (!canSave || saving) return;
+    setError('');
+    setSaving(true);
+    try {
+      await onSave({
+        card_id: pickedCard.canonicalId || pickedCard.id,
+        grading_company: gradingCompany || null,
+        grade: grade !== '' ? Number(grade) : null,
+        bgs_black: bgsBlack,
+        cert_number: certNumber.trim() || null,
+        sale_date: saleDate,
+        sale_price: Number(salePrice),
+        currency: 'USD',
+        marketplace: marketplace.trim(),
+        listing_url: listingUrl.trim() || null,
+        listing_title: listingTitle.trim() || null,
+        notes: notes.trim() || null,
+      });
+    } catch (e) {
+      setError(e?.message || String(e));
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="op-modal-backdrop" onClick={onClose}>
+      <div className="op-modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 540 }}>
+        <div className="op-modal-head">
+          <div>
+            <div className="op-eyebrow">Sales Log</div>
+            <div className="op-modal-title">{existing ? 'Edit sale' : 'Log a sale'}</div>
+          </div>
+          <button className="op-icon-btn" onClick={onClose}><X size={16} /></button>
+        </div>
+
+        <div className="op-modal-body" style={{ display: 'grid', gap: 14 }}>
+          {/* Card picker */}
+          <div>
+            <label className="op-label">Card</label>
+            {pickedCard ? (
+              <div className="op-sale-picked-card">
+                <span>{pickedCard.displayId || pickedCard.id} · {pickedCard.name}</span>
+                <button
+                  className="op-icon-btn"
+                  onClick={() => { setPickedCard(null); setCardQuery(''); }}
+                  title="Change card"
+                >
+                  <X size={14} />
+                </button>
+              </div>
+            ) : (
+              <div style={{ position: 'relative' }}>
+                <input
+                  className="op-input"
+                  placeholder="Search by ID or name (e.g. OP01-016)…"
+                  value={cardQuery}
+                  onChange={(e) => { setCardQuery(e.target.value); setShowSuggestions(true); }}
+                  onFocus={() => setShowSuggestions(true)}
+                  onBlur={() => setTimeout(() => setShowSuggestions(false), 150)}
+                />
+                {showSuggestions && suggestions.length > 0 && (
+                  <div className="op-suggest">
+                    {suggestions.map(c => (
+                      <button
+                        key={c.canonicalId || c.id}
+                        className="op-suggest-row"
+                        onClick={() => { setPickedCard(c); setCardQuery(''); setShowSuggestions(false); }}
+                      >
+                        <span>{c.displayId || c.id}</span>
+                        <span style={{ opacity: 0.7 }}>{c.name}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10 }}>
+            <div>
+              <label className="op-label">Grading co.</label>
+              <select className="op-input" value={gradingCompany} onChange={(e) => setGradingCompany(e.target.value)}>
+                <option value="PSA">PSA</option>
+                <option value="BGS">BGS</option>
+                <option value="CGC">CGC</option>
+                <option value="SGC">SGC</option>
+                <option value="">Raw / none</option>
+              </select>
+            </div>
+            <div>
+              <label className="op-label">Grade</label>
+              <input
+                className="op-input"
+                type="number"
+                step="0.5"
+                min="1"
+                max="10"
+                value={grade}
+                onChange={(e) => setGrade(e.target.value)}
+                disabled={!gradingCompany}
+              />
+            </div>
+            <div style={{ display: 'flex', alignItems: 'flex-end' }}>
+              <label className="op-checkbox" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <input
+                  type="checkbox"
+                  checked={bgsBlack}
+                  onChange={(e) => setBgsBlack(e.target.checked)}
+                  disabled={gradingCompany !== 'BGS'}
+                />
+                BGS Black
+              </label>
+            </div>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+            <div>
+              <label className="op-label">Sale date</label>
+              <input className="op-input" type="date" value={saleDate} onChange={(e) => setSaleDate(e.target.value)} />
+            </div>
+            <div>
+              <label className="op-label">Sale price (USD)</label>
+              <input className="op-input" type="number" step="0.01" min="0" value={salePrice} onChange={(e) => setSalePrice(e.target.value)} />
+            </div>
+          </div>
+
+          <div>
+            <label className="op-label">Marketplace</label>
+            <input
+              className="op-input"
+              list="op-marketplace-suggest"
+              placeholder="eBay, Whatnot, TCGPlayer, Discord …"
+              value={marketplace}
+              onChange={(e) => setMarketplace(e.target.value)}
+            />
+            <datalist id="op-marketplace-suggest">
+              {marketSuggestions.map(m => <option key={m} value={m} />)}
+            </datalist>
+          </div>
+
+          <div>
+            <label className="op-label">Listing URL <span style={{ opacity: 0.6 }}>(optional)</span></label>
+            <input className="op-input" type="url" placeholder="https://…" value={listingUrl} onChange={(e) => setListingUrl(e.target.value)} />
+          </div>
+
+          <div>
+            <label className="op-label">Listing title <span style={{ opacity: 0.6 }}>(optional — for reference)</span></label>
+            <input className="op-input" placeholder="As it appeared on the marketplace" value={listingTitle} onChange={(e) => setListingTitle(e.target.value)} />
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+            <div>
+              <label className="op-label">Cert # <span style={{ opacity: 0.6 }}>(optional)</span></label>
+              <input className="op-input" value={certNumber} onChange={(e) => setCertNumber(e.target.value)} />
+            </div>
+            <div>
+              <label className="op-label">Notes <span style={{ opacity: 0.6 }}>(optional)</span></label>
+              <input className="op-input" value={notes} onChange={(e) => setNotes(e.target.value)} />
+            </div>
+          </div>
+
+          {error && <div className="op-error">{error}</div>}
+        </div>
+
+        <div className="op-modal-actions">
+          <button className="op-btn-ghost" onClick={onClose} disabled={saving}>Cancel</button>
+          <button className="op-btn-primary" onClick={handleSave} disabled={!canSave || saving}>
+            {saving ? 'Saving…' : existing ? 'Save changes' : 'Log sale'}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

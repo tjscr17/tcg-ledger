@@ -1146,3 +1146,157 @@ body { background: var(--paper); }
   .op-drawer-hero { flex-direction: column; }
   .op-drawer-hero-img { width: 120px; }
 }
+
+/* ---------------------------------------------------------- Sales log */
+
+.op-sales-toolbar {
+  display: flex;
+  gap: 8px;
+  margin: 12px 0;
+  flex-wrap: wrap;
+}
+
+.op-sales-summary {
+  display: flex;
+  justify-content: space-between;
+  font-size: 13px;
+  opacity: 0.75;
+  padding: 6px 12px;
+  margin-bottom: 8px;
+  border-bottom: 1px solid var(--op-border, #2a2a2a);
+}
+
+.op-sales-list { display: flex; flex-direction: column; gap: 6px; }
+
+.op-sales-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--op-border, #2a2a2a);
+  border-radius: 8px;
+  background: var(--op-surface, #161616);
+}
+
+.op-sales-row-main { display: flex; flex-direction: column; gap: 4px; min-width: 0; flex: 1; }
+
+.op-sales-row-card {
+  background: none;
+  border: none;
+  color: inherit;
+  text-align: left;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 0;
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.op-sales-row-card:disabled { cursor: default; opacity: 0.7; }
+.op-sales-row-card:hover:not(:disabled) { text-decoration: underline; }
+
+.op-sales-row-meta { display: flex; gap: 6px; flex-wrap: wrap; }
+.op-sales-row-title { font-size: 12px; opacity: 0.7; }
+.op-sales-row-notes { font-size: 12px; opacity: 0.55; font-style: italic; }
+
+.op-sales-row-side {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.op-sales-row-price { font-weight: 600; font-size: 15px; }
+.op-sales-row-date { font-size: 12px; opacity: 0.65; }
+.op-sales-row-actions { display: flex; gap: 4px; margin-top: 2px; }
+
+.op-tag {
+  display: inline-flex;
+  align-items: center;
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--op-surface-sub, #1f1f1f);
+  border: 1px solid var(--op-border, #2a2a2a);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-weight: 600;
+}
+.op-tag-grade { color: #facc15; border-color: #4a3a08; }
+.op-tag-market { color: #38bdf8; border-color: #0c4a6e; }
+
+.op-empty-state {
+  text-align: center;
+  padding: 40px 24px;
+  border: 1px dashed var(--op-border, #2a2a2a);
+  border-radius: 10px;
+  margin: 20px 0;
+}
+.op-empty-icon { opacity: 0.5; margin-bottom: 8px; }
+.op-empty-title { font-weight: 600; font-size: 15px; margin-bottom: 4px; }
+.op-empty-sub { font-size: 13px; opacity: 0.65; max-width: 380px; margin: 0 auto; }
+
+.op-sale-picked-card {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 12px;
+  border: 1px solid var(--op-border, #2a2a2a);
+  border-radius: 6px;
+  background: var(--op-surface, #161616);
+  font-weight: 500;
+}
+
+.op-suggest {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  background: var(--op-surface, #161616);
+  border: 1px solid var(--op-border, #2a2a2a);
+  border-radius: 6px;
+  margin-top: 2px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+  z-index: 20;
+  max-height: 240px;
+  overflow-y: auto;
+}
+.op-suggest-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 6px 10px;
+  background: none;
+  border: none;
+  text-align: left;
+  color: inherit;
+  cursor: pointer;
+  font-size: 13px;
+}
+.op-suggest-row:hover { background: var(--op-surface-sub, #1f1f1f); }
+
+.op-drawer-sales { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
+.op-drawer-sale-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 6px 10px;
+  border: 1px solid var(--op-border, #2a2a2a);
+  border-radius: 6px;
+  font-size: 12px;
+}
+.op-drawer-sale-meta { display: flex; gap: 6px; }
+.op-drawer-sale-side { display: flex; gap: 8px; }
+.op-drawer-sale-price { font-weight: 600; }
+.op-drawer-sale-date { opacity: 0.65; }
+
+.op-icon-btn-danger:hover { color: #ef4444; }
+.op-error {
+  color: #ef4444;
+  font-size: 13px;
+  padding: 6px 10px;
+  background: rgba(239,68,68,0.08);
+  border-radius: 4px;
+}
+.op-label { display: block; font-size: 12px; opacity: 0.75; margin-bottom: 4px; }

@@ -111,15 +111,52 @@ const solo = {
 //   -- for the graded-pricing pipeline (PSA APR Stage 1, eBay sold Stage 2).
 //   --   psa_spec_id text                 // PSA SpecID from the cert lookup;
 //   --                                    // used as the key for PSA APR refresh.
-//   --   graded_price_source text         // 'manual' | 'psa-apr' | 'ebay-sold'
+//   --   graded_price_source text         // 'manual' | 'psa-apr' | 'ebay-sold' | 'sales-log'
 //   --   graded_price_fetched_at timestamptz
 //   --                                    // when the auto-fetched value was set;
-//   --                                    // a later Stage 4 background refresh
-//   --                                    // skips entries whose source is
-//   --                                    // 'manual' (preserves user overrides).
+//   --                                    // refresh skips entries whose source
+//   --                                    // is 'manual' (preserves user overrides).
 //   --   alter table entries add column if not exists psa_spec_id text;
 //   --   alter table entries add column if not exists graded_price_source text;
 //   --   alter table entries add column if not exists graded_price_fetched_at timestamptz;
+//   --   notify pgrst, 'reload schema';
+//
+//   -- sales — observed market sales the user logs as they spot them in the
+//   -- wild (eBay, Whatnot, Discord listings, TCGPlayer marketplace, etc.).
+//   -- The user's own portfolio sells live in `transactions(type='sell')`; this
+//   -- is a separate, arms-length dataset that feeds the graded-pricing
+//   -- estimator.
+//   --
+//   -- Estimator: median of `sales` matching (card_id, grading_company, grade)
+//   -- within a recency window. Refresh-graded-prices reads this table only —
+//   -- no external API dependency. Future automated sources (eBay API, scrapes,
+//   -- etc.) write rows here with `source != 'manual'`; the estimator doesn't
+//   -- care where data came from.
+//   --
+//   --   create table sales (
+//   --     id uuid primary key default gen_random_uuid(),
+//   --     vault_key text not null,
+//   --     created_at timestamptz default now(),
+//   --     card_id text not null,
+//   --     grading_company text,
+//   --     grade numeric,
+//   --     bgs_black boolean default false,
+//   --     cert_number text,
+//   --     sale_date date not null,
+//   --     sale_price numeric not null,
+//   --     currency text default 'USD',
+//   --     marketplace text not null,
+//   --     listing_url text,
+//   --     listing_title text,
+//   --     notes text,
+//   --     source text default 'manual'
+//   --   );
+//   --   create index on sales (vault_key);
+//   --   create index on sales (vault_key, card_id, grading_company, grade);
+//   --   alter publication supabase_realtime add table sales;
+//   --   alter table sales enable row level security;
+//   --   create policy "vault read sales"  on sales for select using (true);
+//   --   create policy "vault write sales" on sales for all using (true);
 //   --   notify pgrst, 'reload schema';
 //   create table entries (
 //     id uuid primary key default gen_random_uuid(),
