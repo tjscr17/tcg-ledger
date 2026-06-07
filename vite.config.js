@@ -74,7 +74,7 @@ export default defineConfig(({ mode }) => {
             const gradeRaw = url.searchParams.get('grade');
             const gradeWanted = gradeRaw != null && gradeRaw !== ''
               ? parseGradeFromString(gradeRaw) : null;
-            const days = Math.max(1, Math.min(3650, Number(url.searchParams.get('days')) || 180));
+            const days = Math.max(1, Math.min(3650, Number(url.searchParams.get('days')) || 365));
 
             const token = env.VITE_PSA_TOKEN || env.PSA_TOKEN;
             if (!token) {
@@ -134,6 +134,12 @@ export default defineConfig(({ mode }) => {
               const sorted = [...gradeMatching].sort((a, b) => (b.date || '').localeCompare(a.date || ''));
               const mostRecent = sorted[0]?.date || null;
 
+              const gradeBreakdown = {};
+              for (const s of inWindow) {
+                const g = s.grade != null ? String(s.grade) : 'unknown';
+                gradeBreakdown[g] = (gradeBreakdown[g] || 0) + 1;
+              }
+
               res.statusCode = 200;
               res.end(JSON.stringify({
                 spec_id: spec,
@@ -146,6 +152,9 @@ export default defineConfig(({ mode }) => {
                 high,
                 most_recent_sale_at: mostRecent,
                 sales: sorted.slice(0, 20),
+                upstream_total: normalizedAll.length,
+                in_window_total: inWindow.length,
+                grade_breakdown: gradeBreakdown,
                 fetched_at: new Date().toISOString(),
                 source: 'psa-apr',
               }));

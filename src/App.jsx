@@ -2265,11 +2265,34 @@ function AddByCertModal({ catalog, collections, activeCollectionId, onClose, onS
                         </div>
                       )}
                     </div>
-                  ) : (
-                    <div className="op-resolve-side-sub" style={{ marginTop: 4 }}>
-                      PSA APR has no recent sales for this card at PSA {cert.grade}. Enter a price manually.
-                    </div>
-                  )
+                  ) : (() => {
+                    // Why was the suggestion empty? Three cases worth
+                    // distinguishing for the user:
+                    //   - PSA has no APR data for this spec at all
+                    //   - PSA has sales but none at this grade in the window
+                    //   - PSA has sales further back than the 365-day window
+                    const upstream = aprSuggestion.upstream_total || 0;
+                    const inWindow = aprSuggestion.in_window_total || 0;
+                    const breakdown = aprSuggestion.grade_breakdown || {};
+                    const otherGrades = Object.entries(breakdown)
+                      .filter(([g, n]) => n > 0 && String(g) !== String(cert.grade))
+                      .sort((a, b) => b[1] - a[1])
+                      .slice(0, 3)
+                      .map(([g, n]) => `PSA ${g} (${n})`);
+                    let msg;
+                    if (upstream === 0) {
+                      msg = `PSA hasn't indexed any auction sales for this card yet (SpecID ${cert.spec_id}). Enter a price manually.`;
+                    } else if (inWindow === 0) {
+                      msg = `PSA has ${upstream} older sale${upstream === 1 ? '' : 's'} for this card but none in the last ${aprSuggestion.window_days}d. Enter a price manually.`;
+                    } else if (otherGrades.length > 0) {
+                      msg = `No PSA ${cert.grade} sales in the last ${aprSuggestion.window_days}d. Other grades seen: ${otherGrades.join(', ')}. Enter a price manually.`;
+                    } else {
+                      msg = `No PSA ${cert.grade} sales in the last ${aprSuggestion.window_days}d. Enter a price manually.`;
+                    }
+                    return (
+                      <div className="op-resolve-side-sub" style={{ marginTop: 4 }}>{msg}</div>
+                    );
+                  })()
                 )}
               </div>
 

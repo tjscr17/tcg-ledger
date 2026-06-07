@@ -67,7 +67,9 @@ export default async function handler(req, res) {
   const gradeWanted = req.query?.grade != null && req.query.grade !== ''
     ? parseGradeFromString(req.query.grade)
     : null;
-  const days = Math.max(1, Math.min(3650, Number(req.query?.days) || 180));
+  // 365d default — OP TCG sales on PSA are sparse; a 180d window often
+  // returns nothing even when PSA does have sales for the card.
+  const days = Math.max(1, Math.min(3650, Number(req.query?.days) || 365));
 
   const token = process.env.VITE_PSA_TOKEN || process.env.PSA_TOKEN;
   if (!token) {
@@ -135,6 +137,14 @@ export default async function handler(req, res) {
   const sorted = [...gradeMatching].sort((a, b) => (b.date || '').localeCompare(a.date || ''));
   const mostRecent = sorted[0]?.date || null;
 
+  // Breakdown by grade across the in-window pool so the UI can offer a
+  // helpful fallback ("no PSA 10 in window but 4 PSA 9 sales available").
+  const gradeBreakdown = {};
+  for (const s of inWindow) {
+    const g = s.grade != null ? String(s.grade) : 'unknown';
+    gradeBreakdown[g] = (gradeBreakdown[g] || 0) + 1;
+  }
+
   res.setHeader('Cache-Control', 's-maxage=3600, stale-while-revalidate=86400');
   res.status(200).json({
     spec_id: specRaw,
@@ -147,6 +157,11 @@ export default async function handler(req, res) {
     high,
     most_recent_sale_at: mostRecent,
     sales: sorted.slice(0, 20),
+    // Counts to distinguish "PSA has zero data" from "PSA has data but
+    // filters drop it all":
+    upstream_total: normalizedAll.length,    // sales PSA returned at any time / any grade
+    in_window_total: inWindow.length,        // sales within `days`
+    grade_breakdown: gradeBreakdown,         // {"10": 0, "9": 4, ...} within window
     fetched_at: new Date().toISOString(),
     source: 'psa-apr',
   });
