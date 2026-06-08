@@ -158,6 +158,14 @@ const solo = {
 //   --   create policy "vault read sales"  on sales for select using (true);
 //   --   create policy "vault write sales" on sales for all using (true);
 //   --   notify pgrst, 'reload schema';
+//
+//   -- One additional constraint needed by the Chrome extension's 130point
+//   -- sync (extension/) — it upserts on (vault_key, listing_url) so resyncs
+//   -- don't write duplicate rows:
+//   --   alter table sales
+//   --     add constraint sales_vault_key_listing_url_unique
+//   --     unique (vault_key, listing_url);
+//   --   notify pgrst, 'reload schema';
 //   create table entries (
 //     id uuid primary key default gen_random_uuid(),
 //     vault_key text not null,

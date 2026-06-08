@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>OPTCG Ledger sync</title>
+  <style>
+    :root {
+      color-scheme: dark light;
+      --bg: #0f0f10;
+      --surface: #1a1a1d;
+      --border: #2a2a2e;
+      --text: #e5e5e5;
+      --muted: #8a8a8a;
+      --accent: #f59e0b;
+      --accent-fg: #1a0c00;
+      --good: #22c55e;
+      --bad: #ef4444;
+    }
+    body {
+      width: 360px;
+      margin: 0;
+      padding: 16px;
+      background: var(--bg);
+      color: var(--text);
+      font: 13px system-ui, -apple-system, sans-serif;
+    }
+    h1 {
+      font-size: 14px;
+      margin: 0 0 14px 0;
+      letter-spacing: 0.04em;
+      color: var(--accent);
+      text-transform: uppercase;
+    }
+    fieldset {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      margin: 0 0 12px 0;
+      padding: 10px;
+    }
+    legend { padding: 0 6px; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; }
+    label { display: block; margin: 6px 0; }
+    label span { display: block; font-size: 11px; color: var(--muted); margin-bottom: 2px; }
+    input[type="text"], input[type="password"], input[type="url"] {
+      width: 100%;
+      padding: 6px 8px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      font: inherit;
+      box-sizing: border-box;
+    }
+    .row { display: flex; gap: 8px; align-items: center; }
+    .btn {
+      padding: 8px 12px;
+      background: var(--accent);
+      color: var(--accent-fg);
+      border: none;
+      border-radius: 6px;
+      font-weight: 600;
+      cursor: pointer;
+      font: inherit;
+    }
+    .btn:disabled { opacity: 0.5; cursor: default; }
+    .btn-ghost {
+      background: transparent;
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+    .status {
+      margin-top: 8px;
+      padding: 10px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      font-size: 12px;
+      line-height: 1.4;
+      min-height: 16px;
+    }
+    .status.good { border-color: var(--good); }
+    .status.bad { border-color: var(--bad); }
+    .progress-bar {
+      margin-top: 6px;
+      height: 4px;
+      background: var(--border);
+      border-radius: 2px;
+      overflow: hidden;
+    }
+    .progress-bar > div {
+      height: 100%;
+      background: var(--accent);
+      width: 0%;
+      transition: width 0.2s ease;
+    }
+    .muted { color: var(--muted); font-size: 11px; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <h1>130point sync</h1>
+
+  <fieldset>
+    <legend>Supabase</legend>
+    <label>
+      <span>Project URL</span>
+      <input type="url" id="supabaseUrl" placeholder="https://xxxx.supabase.co" autocomplete="off">
+    </label>
+    <label>
+      <span>Anon key</span>
+      <input type="password" id="supabaseKey" placeholder="eyJ…" autocomplete="off">
+    </label>
+    <label>
+      <span>Vault key</span>
+      <input type="text" id="vaultKey" placeholder="same VITE_VAULT_KEY your webapp uses" autocomplete="off">
+    </label>
+    <div class="row" style="margin-top:8px">
+      <button class="btn btn-ghost" id="saveBtn">Save settings</button>
+      <span class="muted" id="settingsStatus"></span>
+    </div>
+  </fieldset>
+
+  <div class="row" style="margin-bottom:8px">
+    <button class="btn" id="syncBtn">Sync from 130point</button>
+    <span class="muted">Reads your entries → queries each card → writes sales.</span>
+  </div>
+
+  <div class="status" id="status">Configure settings + open <a href="https://130point.com" target="_blank">130point.com</a> in another tab so Cloudflare clearance is fresh, then click Sync.</div>
+  <div class="progress-bar"><div id="progressBar"></div></div>
+
+  <script type="module" src="popup.js"></script>
+</body>
+</html>
