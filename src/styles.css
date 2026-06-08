@@ -1147,7 +1147,10 @@ body { background: var(--paper); }
   .op-drawer-hero-img { width: 120px; }
 }
 
-/* ---------------------------------------------------------- Sales log */
+/* ---------------------------------------------------------- Sales log
+   Uses the app's theme tokens (--paper / --ink / --line) so it sits next
+   to the Collection view's entry rows visually instead of being a dark
+   slab in a light page. */
 
 .op-sales-toolbar {
   display: flex;
@@ -1160,10 +1163,10 @@ body { background: var(--paper); }
   display: flex;
   justify-content: space-between;
   font-size: 13px;
-  opacity: 0.75;
+  color: var(--ink-soft);
   padding: 6px 12px;
   margin-bottom: 8px;
-  border-bottom: 1px solid var(--op-border, #2a2a2a);
+  border-bottom: 1px solid var(--line);
 }
 
 .op-sales-list { display: flex; flex-direction: column; gap: 6px; }
@@ -1173,17 +1176,19 @@ body { background: var(--paper); }
   justify-content: space-between;
   gap: 12px;
   padding: 10px 12px;
-  border: 1px solid var(--op-border, #2a2a2a);
+  border: 1px solid var(--line);
   border-radius: 8px;
-  background: var(--op-surface, #161616);
+  background: var(--paper);
+  color: var(--ink);
 }
+.op-sales-row:hover { background: var(--paper-warm); border-color: var(--line-strong); }
 
 .op-sales-row-main { display: flex; flex-direction: column; gap: 4px; min-width: 0; flex: 1; }
 
 .op-sales-row-card {
   background: none;
   border: none;
-  color: inherit;
+  color: var(--ink);
   text-align: left;
   font-weight: 600;
   cursor: pointer;
@@ -1197,8 +1202,8 @@ body { background: var(--paper); }
 .op-sales-row-card:hover:not(:disabled) { text-decoration: underline; }
 
 .op-sales-row-meta { display: flex; gap: 6px; flex-wrap: wrap; }
-.op-sales-row-title { font-size: 12px; opacity: 0.7; }
-.op-sales-row-notes { font-size: 12px; opacity: 0.55; font-style: italic; }
+.op-sales-row-title { font-size: 12px; color: var(--ink-soft); }
+.op-sales-row-notes { font-size: 12px; color: var(--ink-soft); opacity: 0.75; font-style: italic; }
 
 .op-sales-row-side {
   display: flex;
@@ -1207,44 +1212,47 @@ body { background: var(--paper); }
   gap: 4px;
   flex-shrink: 0;
 }
-.op-sales-row-price { font-weight: 600; font-size: 15px; }
-.op-sales-row-date { font-size: 12px; opacity: 0.65; }
+.op-sales-row-price { font-weight: 700; font-size: 15px; color: var(--ink); }
+.op-sales-row-date { font-size: 12px; color: var(--ink-soft); }
 .op-sales-row-actions { display: flex; gap: 4px; margin-top: 2px; }
 
 .op-tag {
   display: inline-flex;
   align-items: center;
-  font-size: 11px;
+  font-size: 10px;
   padding: 2px 6px;
   border-radius: 4px;
-  background: var(--op-surface-sub, #1f1f1f);
-  border: 1px solid var(--op-border, #2a2a2a);
+  background: var(--paper-warm);
+  border: 1px solid var(--line);
+  color: var(--ink-soft);
   text-transform: uppercase;
-  letter-spacing: 0.04em;
-  font-weight: 600;
+  letter-spacing: 0.05em;
+  font-weight: 700;
 }
-.op-tag-grade { color: #facc15; border-color: #4a3a08; }
-.op-tag-market { color: #38bdf8; border-color: #0c4a6e; }
+.op-tag-grade { color: var(--gold); border-color: var(--gold-soft); background: rgba(196, 145, 47, 0.08); }
+.op-tag-market { color: var(--navy); border-color: rgba(31, 45, 61, 0.25); background: rgba(31, 45, 61, 0.05); }
 
 .op-empty-state {
   text-align: center;
   padding: 40px 24px;
-  border: 1px dashed var(--op-border, #2a2a2a);
+  border: 1px dashed var(--line-strong);
   border-radius: 10px;
   margin: 20px 0;
+  background: var(--paper);
 }
-.op-empty-icon { opacity: 0.5; margin-bottom: 8px; }
-.op-empty-title { font-weight: 600; font-size: 15px; margin-bottom: 4px; }
-.op-empty-sub { font-size: 13px; opacity: 0.65; max-width: 380px; margin: 0 auto; }
+.op-empty-icon { color: var(--ink-soft); opacity: 0.6; margin-bottom: 8px; }
+.op-empty-title { font-weight: 600; font-size: 15px; margin-bottom: 4px; color: var(--ink); }
+.op-empty-sub { font-size: 13px; color: var(--ink-soft); max-width: 380px; margin: 0 auto; }
 
 .op-sale-picked-card {
   display: flex;
   justify-content: space-between;
   align-items: center;
   padding: 8px 12px;
-  border: 1px solid var(--op-border, #2a2a2a);
+  border: 1px solid var(--line);
   border-radius: 6px;
-  background: var(--op-surface, #161616);
+  background: var(--paper-warm);
+  color: var(--ink);
   font-weight: 500;
 }
 
@@ -1253,11 +1261,11 @@ body { background: var(--paper); }
   top: 100%;
   left: 0;
   right: 0;
-  background: var(--op-surface, #161616);
-  border: 1px solid var(--op-border, #2a2a2a);
+  background: var(--paper);
+  border: 1px solid var(--line-strong);
   border-radius: 6px;
   margin-top: 2px;
-  box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+  box-shadow: 0 4px 12px rgba(26, 22, 18, 0.15);
   z-index: 20;
   max-height: 240px;
   overflow-y: auto;
@@ -1271,32 +1279,34 @@ body { background: var(--paper); }
   background: none;
   border: none;
   text-align: left;
-  color: inherit;
+  color: var(--ink);
   cursor: pointer;
   font-size: 13px;
 }
-.op-suggest-row:hover { background: var(--op-surface-sub, #1f1f1f); }
+.op-suggest-row:hover { background: var(--paper-warm); }
 
 .op-drawer-sales { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
 .op-drawer-sale-row {
   display: flex;
   justify-content: space-between;
   padding: 6px 10px;
-  border: 1px solid var(--op-border, #2a2a2a);
+  border: 1px solid var(--line);
   border-radius: 6px;
+  background: var(--paper);
   font-size: 12px;
 }
 .op-drawer-sale-meta { display: flex; gap: 6px; }
 .op-drawer-sale-side { display: flex; gap: 8px; }
-.op-drawer-sale-price { font-weight: 600; }
-.op-drawer-sale-date { opacity: 0.65; }
+.op-drawer-sale-price { font-weight: 700; color: var(--ink); }
+.op-drawer-sale-date { color: var(--ink-soft); }
 
-.op-icon-btn-danger:hover { color: #ef4444; }
+.op-icon-btn-danger:hover { color: var(--berry); }
 .op-error {
-  color: #ef4444;
+  color: var(--berry-deep);
   font-size: 13px;
   padding: 6px 10px;
-  background: rgba(239,68,68,0.08);
+  background: rgba(200, 68, 42, 0.08);
+  border: 1px solid rgba(200, 68, 42, 0.2);
   border-radius: 4px;
 }
-.op-label { display: block; font-size: 12px; opacity: 0.75; margin-bottom: 4px; }
+.op-label { display: block; font-size: 11px; color: var(--ink-soft); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600; }
