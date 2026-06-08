@@ -183,6 +183,14 @@ export default function App() {
   }, []);
 
   // Load user data
+  // Guard so the empty-collections auto-seed only fires once per session.
+  // Without this, every realtime tick that momentarily returned `cols=[]`
+  // (Supabase eventual-consistency lag, transient network blips) would
+  // insert a fresh "Main Collection". When the 130point sync was writing
+  // 100+ sales rows in quick succession, that path ran enough times to
+  // create ~10 duplicate Main Collections in one minute.
+  const didAutoSeedRef = useRef(false);
+
   const refreshData = useCallback(async () => {
     const [cols, ents, txs, watches, salesRows] = await Promise.all([
       store.list('collections'),
@@ -192,9 +200,12 @@ export default function App() {
       store.list('sales').catch(() => []),
     ]);
     let cs = cols;
-    if (cs.length === 0) {
+    if (cs.length === 0 && !didAutoSeedRef.current) {
+      didAutoSeedRef.current = true;
       const seed = await store.insert('collections', { id: uid(), name: 'Main Collection', created_at: new Date().toISOString() });
       cs = [seed].filter(Boolean);
+    } else if (cs.length > 0) {
+      didAutoSeedRef.current = true; // any non-empty result means we don't need to seed
     }
     setCollections(cs);
     setEntries(ents);
