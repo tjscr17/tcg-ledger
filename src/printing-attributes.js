@@ -42,13 +42,21 @@ const BUILTINS = [
   },
   // Special-edition promo variants ship as builtins so common cards
   // (Dodgers Luffy, Anniversary alts, judge promos) match listing titles
-  // out of the box. Each saleValue is permissive enough to catch the
-  // standard ways sellers describe these printings.
+  // out of the box.
+  //
+  // value (catalog) is intentionally parens-required — TCGPlayer uses
+  // `(Foo)` labels consistently for variant printings and matching free
+  // text would mis-tag any product whose name happens to mention the
+  // keyword (a Champions of Earth set wrongly gets every card tagged
+  // 'championship'; a flavor-text 'Judge' word breaks things; etc).
+  //
+  // saleValue (sale matcher) is the permissive free-text form because
+  // eBay sellers don't follow TCGPlayer conventions.
   {
     key: 'dodgers',
     label: 'Dodgers Promo',
     mode: 'regex',
-    value: '\\bDodgers\\b',
+    value: '\\(Dodgers\\)|\\(LA\\s+Dodgers\\)|\\(Dodgers\\s+(?:Promo|Edition)\\)',
     saleValue: '\\bDodgers\\b|\\bLA\\s+Dodgers\\b',
     builtin: true,
   },
@@ -56,7 +64,7 @@ const BUILTINS = [
     key: 'anniversary',
     label: 'Anniversary',
     mode: 'regex',
-    value: '\\bAnniversary\\b',
+    value: '\\(Anniversary\\)|\\(\\d+(?:st|nd|rd|th)\\s+Anniversary\\)',
     saleValue: '\\bAnniversary\\b|\\b\\d+(?:st|nd|rd|th)\\s+Ann(?:iv)?\\b',
     builtin: true,
   },
@@ -64,7 +72,7 @@ const BUILTINS = [
     key: 'aniplex',
     label: 'Aniplex',
     mode: 'regex',
-    value: '\\bAniplex\\b',
+    value: '\\(Aniplex\\)',
     saleValue: '\\bAniplex\\b',
     builtin: true,
   },
@@ -72,7 +80,7 @@ const BUILTINS = [
     key: 'judge',
     label: 'Judge Promo',
     mode: 'regex',
-    value: '\\bJudge\\b',
+    value: '\\(Judge\\)|\\(Judge\\s+(?:Promo|Reward|Edition)\\)',
     saleValue: '\\bJudge(?:\\s+(?:Promo|Reward|Edition))?\\b',
     builtin: true,
   },
@@ -80,7 +88,7 @@ const BUILTINS = [
     key: 'championship',
     label: 'Championship',
     mode: 'regex',
-    value: '\\bChampionship\\b',
+    value: '\\(Championship\\)|\\(Championship\\s+(?:Promo|Pack)\\)',
     saleValue: '\\bChampionship\\b',
     builtin: true,
   },
