@@ -943,8 +943,20 @@ export default function App() {
             // Pre-errata twins are stored against the BASE card id (not the
             // twin's suffixed id), so strip the suffix if the user opened the
             // twin and clicks "remove pre-errata".
-            const baseId = detailCard.id.replace(/__pre-errata$/, '');
+            console.info('[pre-errata] toggle clicked', {
+              detailCardId: detailCard?.id,
+              detailCardCanonical: detailCard?.canonicalId,
+              detailCardName: detailCard?.name,
+            });
+            if (!detailCard?.id) {
+              console.warn('[pre-errata] detailCard.id is missing — nothing to toggle');
+              return;
+            }
+            const baseId = String(detailCard.id).replace(/__pre-errata$/, '');
+            const wasMarked = hasPreErrata(baseId);
             togglePreErrata(baseId);
+            const nowMarked = hasPreErrata(baseId);
+            console.info('[pre-errata] toggle result', { baseId, wasMarked, nowMarked });
             setErratTick(t => t + 1);
           }}
         />
