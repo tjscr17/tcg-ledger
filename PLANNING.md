@@ -44,8 +44,13 @@ Status conventions:
 | Append-only ledger guarantees | ❌ | Transactions are user-deletable; no immutable `sales` / `price_history` |
 | Historical price snapshots in DB | ⬜ | OPTCGAPI's 14-day endpoint is gone (catalog source removed); no local persistence |
 | Live listings / underpriced alerts | ⬜ | Future Phase 3 |
-| Fair value model | ⬜ | Future Phase 4 |
-| Grade premium model | ⬜ | Graded prices are manual entry only (auto-fetch parked Stage 4); a pop-aware scarcity model needs eBay-sold data |
+| Fair value model | 🟡 | `estimateGradedPrice` in App.jsx reads `sales` table → median per (canonical_id + grade + bgs_black, last 180d). Two sources feeding the table today (130point Chrome ext + manual). Pop-aware scarcity refinement still ⬜. |
+| Grade premium model | 🟡 | PSA APR one-shot suggestion in AddByCertModal + sales-log median in Refresh button. Pop-aware regression (PSA 9 + pop → PSA 10 premium) still ⬜. |
+| Self-sourced sales pipeline (`sales` table + `LogSaleModal` + estimator + Refresh button) | ✅ | New `sales` table (vault-scoped) feeds `estimateGradedPrice`. Collection-tab **Refresh graded prices** button writes the median into `entries.graded_price` with `graded_price_source='sales-log'`. Manual entries preserved. |
+| PSA Auction Prices Realized integration | ✅ | `api/psa-apr.js` proxies PSA's APR endpoint; AddByCertModal shows a median+window+sample-count chip when a cert resolves. 24h server-side memo; free-tier 100/day quota surfaced explicitly on 429. |
+| Chrome extension for 130point sync | ✅ | `extension/` (MV3). Content-script-driven fetches from inside the user's 130point.com tab so requests carry `cf_clearance`. Polite 1.2s/query; bulk dedup by `(vault_key, listing_url)` upsert. |
+| Smart sale-to-card matcher (aliases + variants + catalog-name disambiguation) | ✅ | `src/sale-matcher.js`. Word-based aliases + permissive `saleValue` regexes on printing-attributes + catalog `fullName` token overlap as the tie-breaker. Pure function, called once per data change via App's `matchedSales` useMemo. |
+| Card aliases (nicknames) | ✅ | `src/card-aliases.js` + Supabase `card_aliases` table. Vault-scoped. Managed from a new Aliases section in CardDetailDrawer. |
 | JP / EU coverage | ⬜ | English-only catalog. JP / Korean spec work parked. |
 | Python anywhere | ❌ | Project is React + Vite + JS only; reversed from the original context doc |
 | TCGCSV integration (catalog + prices) | ✅ | Complete (2026-06-01): TCGCSV is both the catalog source AND the price source. OPTCGAPI fully removed. |
@@ -125,20 +130,46 @@ on a VPS, alert rules, notifications.
 - ⬜ No scraper code. No notification integration.
 - ⬜ Hosting target for Playwright not decided (VPS vs GitHub Actions).
 
-### Phase 4 — Fair value model ⬜
+### Phase 4 — Fair value model 🟡
 
-eBay Marketplace Insights → `sales` (append-only), liquid + illiquid models,
-`fair_values` publish.
+Original context-doc framing: eBay Marketplace Insights → `sales`
+(append-only), liquid + illiquid models, `fair_values` publish.
 
-**Current state:** none of this exists. Prices are direct TCGCSV reads.
+**Current state (2026-06-07):**
+- ✅ `sales` table exists and is feeding a working estimator. **Not**
+  append-only — like `transactions`, rows are user-deletable. The user
+  intentionally chose this so misclassifications can be cleaned up rather
+  than accumulating into the median.
+- ✅ `estimateGradedPrice(cardId, gradingCompany, grade, {days=180,
+  bgsBlack})` returns `{ price (median), sampleCount, low, high,
+  mostRecentSaleAt }` filtered on canonical_id + grading_company + grade
+  + BGS Black + recency window.
+- ✅ Two data sources today:
+  - **130point Chrome extension** — bulk scrape per owned displayId. The
+    user's browser session passes Cloudflare; the extension's looser
+    scraper accepts all USD non-bundle results and lets the display-time
+    matcher classify.
+  - **Manual via `LogSaleModal`** — escape hatch for sales spotted
+    off-marketplace or in other channels.
+- ⬜ Liquid/illiquid model split, `fair_values` publish, and the
+  pop-aware scarcity refinement remain ⬜.
+- ⬜ eBay Marketplace Insights — blocked on the user's eBay developer
+  account verification. Will become a sibling source to the extension
+  feeding the same `sales` table once it lands.
 
-### Phase 5 — Grade premiums ⬜
+### Phase 5 — Grade premiums 🟡
 
-Pop-aware scarcity multipliers.
+Original framing: pop-aware scarcity multipliers — infer PSA 10 premium
+from PSA 9 + pop count.
 
-**Current state:** graded prices are manual entry on entries — auto-fetch
-parked in Stage 4 of the TCGCSV migration. Re-enable once Phase 4 lands
-eBay sold data, or pull from a different graded source if one shows up.
+**Current state (2026-06-07):**
+- ✅ Two grade-aware auto-fetch sources are live (PSA APR per-cert
+  suggestion + sales-log median per Refresh button), replacing the
+  original "manual entry only" baseline.
+- ⬜ The actual **regression model** that turns lower-grade sales + pop
+  count into a higher-grade premium estimate is unbuilt — needs eBay's
+  more comprehensive sold-listing data and PSA pop counts. Pop data is
+  available via the same PSA Public API; the gap is the model itself.
 
 ### Later
 
@@ -277,16 +308,27 @@ shown is the first commit introducing the change.
 | 2026-06-01 | Surface Supabase insert errors in the alert. `storage.js` captures `error.code/message/details/hint` to `lastStoreError`; `addEntry` reads it via `getLastStoreError()` and includes the detail in the "Couldn't save the entry" alert. | The generic alert sent the user to the console; concrete reports were easier than diagnosing remotely. The first real use diagnosed a missing `grade_description` column without round-trips. | `src/storage.js`, `src/App.jsx` |
 | 2026-06-02 | Cleanup sweep via `/cleanup` (post-rebrand). Dropped unused exports/imports across App.jsx, pricing.js, catalog.js, printing-attributes.js, card-attribute-overrides.js, psa.js, storage.js. Deleted `searchTcgProducts`, `pickBestMatchForCard`, `confidentMatchForCard`, `autoResolveCard`, `diagnoseResolution`, `cardNumberFromCanonical`, `getAllMatchReports`, `matchCatalogCard`, `listUserVariants`, `updateUserVariant`, `clearCardAttributeOverride`, `clearLastStoreError`. Unexported `getTcgId` (pricing.js) and `canonicalIdOf` (catalog.js). Internal helpers `cardHasAttr`/`productHasAttr` dropped along with their callers. Stale CSS removed: `op-chart*`, `op-drawer-hero-text`, `op-graded-caveat`, `op-prefetch-*` family, `op-resolve-meta/name/sub/prices/price-*/diag-head`. Net: +41 / -344 lines. | Codebase had accumulated leftovers from the catalog-source switch, override-picker removal, and per-card override refactor. | `src/App.jsx`, `src/pricing.js`, `src/catalog.js`, `src/printing-attributes.js`, `src/card-attribute-overrides.js`, `src/psa.js`, `src/storage.js`, `src/styles.css` |
 | 2026-06-02 | Remote bug-fix pipeline spec integrated from `directions/REMOTE_BUGFIX_PIPELINE.md`. Four-phase initiative: in-site bug reporter → Supabase→GitHub bridge → Claude Code auto-fix via GitHub Actions → mobile notifications. Captured as a cross-cutting initiative section in PLANNING.md plus a status snapshot row. Forces the long-pending "real Supabase Auth?" decision because the `bug_reports` table needs a real `reporter_id`. | The user wanted a way to report bugs from a phone away from the dev machine and get a Vercel preview link back. Off the main pricing roadmap but high personal leverage. | `PLANNING.md` (this file) |
+| 2026-06-07 | Graded pricing Stage 1: PSA Auction Prices Realized auto-fill. New `api/psa-apr.js` Vercel function (plus vite dev mirror) proxies PSA's APR endpoint and returns `{ suggested_price (median), sample_count, low, high, window_days, upstream_status, ... }` for a SpecID + grade + window. AddByCertModal shows a suggestion chip when a cert resolves to a SpecID. 24h server-side memo on successes; failed responses (including 429 quota-exhausted) are NOT cached so the next day's call can succeed. Client-side skip-recent guard avoids redundant calls within 24h. Entries gain `psa_spec_id`, `graded_price_source` (`'manual'|'psa-apr'|'sales-log'`), `graded_price_fetched_at` columns; `src/storage.js` documents the migrations. | OP TCG sales on PSA APR are thin — most lookups return zero matching sales — but the chip surfaces 429 / no-data / no-window-data distinctly so the user can tell why instead of seeing a generic "no APR data" message. Free-tier 100/day quota busts fast at sustained use; the cache + skip-recent + diagnostic UX make it manageable. | `api/psa-apr.js`, `vite.config.js`, `src/psa.js`, `src/App.jsx`, `src/storage.js` |
+| 2026-06-07 | Self-sourced sales pipeline. New `sales` Supabase table (vault-scoped, indexed on `(card_id, grading_company, grade)`) holds observed market sales. New `LogSaleModal` for manual entry; new `SalesView` tab between Watch and Catalog for the filterable log. `estimateGradedPrice(cardId, gradingCompany, grade, opts)` returns median + sample-count + range; the existing "Refresh graded prices" Collection-tab button was repurposed to read this estimator and write to `entries.graded_price` with `graded_price_source='sales-log'`. Manual entries (source='manual') are preserved across refreshes. Drawer gets a "Recent sales for this card" mini-panel (clickable rows → original listing URL) and a "Log a sale" action that pre-fills the card. Schema docs at the top of `src/storage.js`. **Decision NOT taken:** sales rows are user-deletable per row (same as `transactions`) — the user wanted to be able to clean up misclassifications, not have them accumulate into the median. | Earlier graded-price plans (PSA APR alone, eBay-API alone) were each bottlenecked on something the user couldn't control (PSA quota, eBay verification). Owning the data — user logs what they see, plus what an extension scrapes — sidesteps both, and the same table accepts future automated sources without architecture change. | `src/App.jsx` (SalesView, LogSaleModal, estimateGradedPrice, refreshGradedPrices), `src/storage.js` (schema) |
+| 2026-06-07 | Chrome extension for 130point sync. `extension/` (manifest v3) syncs sold listings into the `sales` Supabase table by running fetches from inside the user's 130point.com tab. Architecture: background SW orchestrates; content script (declared on `https://130point.com/*`) does the fetch + DOMParser + parse from same-origin context. Cloudflare blocks any fetch originating from `chrome-extension://` (cross-site) even with `cf_clearance` attached — running inside the tab makes requests look like normal page navigations. Polite 1.2s/query delay. Loosened scraper (post-v0.2) accepts any non-bundle USD result; display-time matcher handles classification. Reclassify-all button + alias additions retroactively fix mis-tagged rows. One-time unique constraint `(vault_key, listing_url)` on `sales` for the upsert dedup. | The user wanted automation but didn't want to set up paid scraping infrastructure or wait on API verifications. Browser-driven scraping via an extension is the architecture that delivered: zero ongoing cost, zero proxy infrastructure, immune to IP blocking. Same pattern would generalize to any future marketplace (eBay sold, Whatnot ended, TCGPlayer marketplace) with a sibling parser. | `extension/manifest.json`, `extension/background.js`, `extension/content.js`, `extension/parser.js`, `extension/popup.html`, `extension/popup.js`, `extension/README.md`, `src/storage.js` (constraint docs) |
+| 2026-06-07 | Smart sale-to-card matcher (`src/sale-matcher.js`) with three new layers on top of card-ID regex: **(1)** user-added **card aliases** (`src/card-aliases.js` + new `card_aliases` Supabase table) match free-text nicknames (e.g. "Dodgers Luffy") to specific canonical_ids using word-based matching (every alias word must be a token in the title; longest total-character-length wins). **(2)** Printing-attribute registry got a new `saleValue` field running against eBay/130point listing titles (where TCGPlayer's parens-required `value` regex doesn't fire). Five new builtins shipped: `dodgers`, `anniversary`, `aniplex`, `judge`, `championship`. Pre-errata added as a builtin too — its `value` is intentionally unreachable (TCGPlayer never labels it) but the `saleValue` catches "Pre-Errata" in listing titles. **(3)** Catalog-name disambiguation — when 1+2 leave the matcher at base but the catalog has multiple variants for that displayId, the matcher scores each variant's `fullName` tokens (excluding the card-ID) against the title and picks the best. Pure function; called once per state change inside App.jsx's `matchedSales` useMemo. SalesView + drawer + estimator + reclassify-all all consume the pre-computed list, avoiding the per-render matcher storm that previously froze the UI on a pre-errata toggle. Strict variant filtering on drawer & estimator (Dodgers Luffy shows only Dodgers sales; base view still shows all variants for the displayId). | The earlier matcher was "card-ID regex + a few hardcoded keywords"; it bucketed many real sales as base and mis-classified the Dodgers Luffy entirely. Catalog already knew about the variants (`(Dodgers)`, `(Manga Rare)`, etc.) — using that knowledge at sale-matching time was the obvious unlock. Word-based aliases mean one "Dodgers Luffy" alias catches "LA Dodgers Luffy" and "Luffy Dodgers Promo" without the user having to register every word-order variant. | `src/sale-matcher.js`, `src/card-aliases.js`, `src/printing-attributes.js`, `src/App.jsx`, `src/storage.js` |
 
 ### Decisions explicitly **not** taken (despite the context doc)
 
 - Did **not** move backend to Python. Project is JS end-to-end.
 - Did **not** adopt the proposed `cards / card_mappings / holdings / ...`
-  schema. Current schema is `collections / entries / transactions / ...`
-  keyed by vault, with canonical card ids as direct keys.
+  schema. Current schema is `collections / entries / transactions / sales /
+  card_aliases / watchlist / card_resolutions` keyed by vault, with
+  canonical card ids as direct keys.
 - Did **not** add real user auth. `VITE_VAULT_KEY` is the access boundary.
 - Did **not** make `sales` / `transactions` append-only. The user
-  intentionally has a delete-tx action.
+  intentionally has a delete-tx action; same for `sales` rows
+  (misclassifications get cleaned up rather than accumulating into the
+  estimator's median).
+- Did **not** build a server-side scraping pipeline. Browser-driven
+  scraping via a Chrome extension (`extension/`) sidesteps Cloudflare
+  and zero ongoing infrastructure cost — Playwright + residential proxies
+  not pursued.
 
 Any of these can be revisited; flagging them so the next planning pass is
 informed by the gap.
@@ -319,7 +361,11 @@ New, from current code state:
   the source switch. No separate `card_mappings` table; the TCGPlayer
   `productId` lives directly on the catalog card.
 - **Watchlist scraping target** — TCGPlayer first (matches existing catalog
-  bridge via `tcg_id`)? eBay first (richer for alerts)? Both?
+  bridge via `tcg_id`)? eBay first (richer for alerts)? Both? The 130point
+  Chrome-extension architecture (browser-tab-driven, content-script fetches)
+  is already proven viable for one site; the same pattern would generalize
+  to a TCGPlayer or eBay watchlist scraper without needing server-side
+  infrastructure.
 - **JP / Korean catalog support** — pending design discussion. TCGPlayer is
   English-only; a JP source (Bandai's official catalog, Yuyu-tei, etc.)
   would need its own data pipeline and pricing source. Parked.
