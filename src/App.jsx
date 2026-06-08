@@ -338,18 +338,31 @@ export default function App() {
     return m;
   }, [augmentedCatalog]);
 
-  // Pre-match every sale ONCE per (sales, aliasRev, variantRev) change.
-  // Both the drawer's recent-sales panel and the SalesView's filtered list
-  // read from this list instead of re-running the matcher on each render.
-  //
-  // Critical for perf: deps deliberately exclude catalogIndex / erratTick.
-  // Pre-errata toggle, attribute-override edits, etc. all bump catalogIndex
-  // but they do NOT change how titles classify — re-running matchSaleToCard
-  // (which is the expensive part) on those bumps is what was causing the
-  // ~2.7s click freeze the user saw when toggling pre-errata.
+  // displayId → [card1, card2, ...] grouping so the matcher can disambiguate
+  // variants by catalog fullName tokens (e.g. picking 'Yamato (Manga Rare)
+  // - OP05-003' over the base when a title says 'Yamato Manga PSA 10
+  // OP05-003' even without the explicit 'Manga Rare' keyword).
+  const catalogByDisplayId = useMemo(() => {
+    const m = new Map();
+    for (const c of augmentedCatalog) {
+      const did = displayIdOf(c.canonicalId);
+      if (!did) continue;
+      let arr = m.get(did);
+      if (!arr) { arr = []; m.set(did, arr); }
+      arr.push(c);
+    }
+    return m;
+  }, [augmentedCatalog]);
+
+  // Pre-match every sale ONCE per (sales, aliasRev, variantRev,
+  // catalogByDisplayId) change. catalogByDisplayId IS a dep here even
+  // though it might churn on pre-errata toggle — the matcher's
+  // name-disambiguation step legitimately depends on it. Empirically the
+  // memo runs fast (~50ms for 500 sales × small variant counts per
+  // displayId) so we accept this cost.
   const matchedSales = useMemo(() => {
     return sales.map(s => {
-      const m = matchSaleToCard(s.listing_title || '', s.card_id);
+      const m = matchSaleToCard(s.listing_title || '', s.card_id, catalogByDisplayId);
       const effectiveCardId = m.canonicalId || s.card_id;
       return {
         ...s,
@@ -358,7 +371,7 @@ export default function App() {
       };
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sales, aliasRev, variantRev]);
+  }, [sales, aliasRev, variantRev, catalogByDisplayId]);
 
   const addCollection = async (name) => {
     const created = await store.insert('collections', { id: uid(), name, created_at: new Date().toISOString() });
@@ -463,7 +476,7 @@ export default function App() {
     for (let i = 0; i < sales.length; i++) {
       const s = sales[i];
       try {
-        const m = matchSaleToCard(s.listing_title || '', s.card_id);
+        const m = matchSaleToCard(s.listing_title || '', s.card_id, catalogByDisplayId);
         const newId = m.canonicalId || s.card_id;
         if (newId !== s.card_id) {
           await store.update('sales', s.id, { card_id: newId });
@@ -478,7 +491,7 @@ export default function App() {
       setReclassifyState(prev => prev ? { ...prev, done: i + 1, updated, unchanged } : null);
     }
     setReclassifyState(prev => prev ? { ...prev, running: false } : null);
-  }, [sales]);
+  }, [sales, catalogByDisplayId]);
 
   // estimateGradedPrice — median of matching sales in the recency window.
   // Reads matchedSales (pre-computed) so this stays cheap. Strict equality
@@ -948,20 +961,9 @@ export default function App() {
             // Pre-errata twins are stored against the BASE card id (not the
             // twin's suffixed id), so strip the suffix if the user opened the
             // twin and clicks "remove pre-errata".
-            console.info('[pre-errata] toggle clicked', {
-              detailCardId: detailCard?.id,
-              detailCardCanonical: detailCard?.canonicalId,
-              detailCardName: detailCard?.name,
-            });
-            if (!detailCard?.id) {
-              console.warn('[pre-errata] detailCard.id is missing — nothing to toggle');
-              return;
-            }
+            if (!detailCard?.id) return;
             const baseId = String(detailCard.id).replace(/__pre-errata$/, '');
-            const wasMarked = hasPreErrata(baseId);
             togglePreErrata(baseId);
-            const nowMarked = hasPreErrata(baseId);
-            console.info('[pre-errata] toggle result', { baseId, wasMarked, nowMarked });
             setErratTick(t => t + 1);
           }}
         />

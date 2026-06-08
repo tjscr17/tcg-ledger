@@ -28,6 +28,18 @@ import { allAliases } from './card-aliases.js';
 
 const CARD_ID_RE = /\b(?:OP|EB|ST|PRB)\d{2}-[A-Z]?\d{2,3}[A-Z]?\b/gi;
 
+// Strip card-IDs out of text before tokenizing — they're an anchoring
+// signal already handled by the card-ID layer and including them in the
+// name-overlap score would dilute meaningful tokens like "Manga" / "Rare"
+// / "Dodgers".
+function tokensExcludingCardId(text) {
+  if (!text) return new Set();
+  const stripped = String(text)
+    .toLowerCase()
+    .replace(/\b(?:op|eb|st|prb)\d{2}-[a-z]?\d{2,3}[a-z]?\b/g, ' ');
+  return new Set(stripped.match(/[a-z0-9]+/g) || []);
+}
+
 // Extract the displayId portion of any canonical card_id, mirroring the
 // helper in App.jsx — duplicated here so this module stays self-contained.
 //   OP01-016                       → OP01-016
@@ -99,16 +111,22 @@ function joinCanonicalId(displayId, attributeKeys) {
 }
 
 // Public — the matcher. Inputs:
-//   title        : listing title text
-//   sourceCardId : optional hint from the scraper's stored card_id. If
-//                  provided and we can't confidently identify the card from
-//                  the title, we fall back to its displayId.
+//   title             : listing title text
+//   sourceCardId      : optional hint from the scraper's stored card_id.
+//                       Used as a last-resort fallback when the title
+//                       carries nothing identifying.
+//   catalogByDisplayId: optional Map<displayId, card[]> for variant
+//                       disambiguation by the catalog's fullName tokens
+//                       (handles cases like 'Yamato Manga PSA 10
+//                       OP05-003' where the keyword detector can't
+//                       pick a variant but the catalog's
+//                       "Yamato (Manga Rare)" fullName does).
 // Returns:
 //   { canonicalId, displayId, attributeKeys, source, isBundle }
-//   source ∈ 'alias' | 'card-id' | 'fallback' | null
+//   source ∈ 'alias' | 'card-id' | 'card-id+name' | 'fallback' | null
 //   isBundle is true when the title contains 2+ distinct card IDs.
 //   canonicalId is null when nothing identifies a card.
-export function matchSaleToCard(title, sourceCardId = null) {
+export function matchSaleToCard(title, sourceCardId = null, catalogByDisplayId = null) {
   const ids = cardIdsFromTitle(title);
   const isBundle = ids.length > 1;
 
@@ -146,19 +164,45 @@ export function matchSaleToCard(title, sourceCardId = null) {
   if (ids.length === 1) {
     const displayId = ids[0];
     let attributeKeys = detectPrintingAttributesFromTitle(title);
-    // Pre-errata wins over other tags — mirrors catalog.js canonicalIdOf,
-    // where the pre-errata twin is mutually exclusive with parallel/manga
-    // tags. A title saying "Pre-Errata Parallel" is bucketed as
-    // pre-errata, not parallel-pre-errata (which the catalog wouldn't
-    // have).
     if (attributeKeys.includes('pre-errata')) attributeKeys = ['pre-errata'];
-    return {
-      canonicalId: joinCanonicalId(displayId, attributeKeys),
-      displayId,
-      attributeKeys,
-      source: 'card-id',
-      isBundle: false,
-    };
+    let canonicalId = joinCanonicalId(displayId, attributeKeys);
+    let source = 'card-id';
+
+    // Catalog-name disambiguation. When the keyword detector didn't pick
+    // any variant (we'd otherwise default to base) AND the catalog has
+    // multiple variant printings for this displayId, score each variant
+    // by how many of its fullName tokens appear in the title. Best wins,
+    // but only when the evidence is meaningful (≥2 non-trivial tokens).
+    //
+    // Why "didn't pick any variant" gate: when a keyword does fire
+    // ('Manga Rare', 'Parallel', 'Dodgers'), it's already chosen the
+    // right variant; running name disambiguation could swap to a
+    // worse pick on token-count alone. The name layer is for the cases
+    // the keyword layer couldn't handle.
+    if (attributeKeys.length === 0 && catalogByDisplayId) {
+      const variants = catalogByDisplayId.get(displayId);
+      if (Array.isArray(variants) && variants.length > 1) {
+        const titleTokens = tokensExcludingCardId(title);
+        let best = null;
+        for (const v of variants) {
+          const vTokens = tokensExcludingCardId(v.fullName || v.name || '');
+          let score = 0;
+          for (const t of vTokens) {
+            if (t.length < 3) continue; // skip noise like 'a', 'd' (initials)
+            if (titleTokens.has(t)) score += 1;
+          }
+          if (!best || score > best.score) best = { canonicalId: v.canonicalId, score };
+        }
+        if (best && best.canonicalId && best.score >= 2 && best.canonicalId !== canonicalId) {
+          canonicalId = best.canonicalId;
+          // attributeKeys stays empty — we no longer know the exact
+          // attribute set; canonicalId came whole from the catalog.
+          source = 'card-id+name';
+        }
+      }
+    }
+
+    return { canonicalId, displayId, attributeKeys, source, isBundle: false };
   }
 
   // No card-ID in title, no alias hit. Fall back to whatever the scraper
