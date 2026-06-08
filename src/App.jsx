@@ -338,6 +338,28 @@ export default function App() {
     return m;
   }, [augmentedCatalog]);
 
+  // Pre-match every sale ONCE per (sales, aliasRev, variantRev) change.
+  // Both the drawer's recent-sales panel and the SalesView's filtered list
+  // read from this list instead of re-running the matcher on each render.
+  //
+  // Critical for perf: deps deliberately exclude catalogIndex / erratTick.
+  // Pre-errata toggle, attribute-override edits, etc. all bump catalogIndex
+  // but they do NOT change how titles classify — re-running matchSaleToCard
+  // (which is the expensive part) on those bumps is what was causing the
+  // ~2.7s click freeze the user saw when toggling pre-errata.
+  const matchedSales = useMemo(() => {
+    return sales.map(s => {
+      const m = matchSaleToCard(s.listing_title || '', s.card_id);
+      const effectiveCardId = m.canonicalId || s.card_id;
+      return {
+        ...s,
+        _effectiveCardId: effectiveCardId,
+        _effectiveDisplayId: displayIdOf(effectiveCardId),
+      };
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sales, aliasRev, variantRev]);
+
   const addCollection = async (name) => {
     const created = await store.insert('collections', { id: uid(), name, created_at: new Date().toISOString() });
     if (created) setCollections([...collections, created]);
@@ -459,29 +481,21 @@ export default function App() {
   }, [sales]);
 
   // estimateGradedPrice — median of matching sales in the recency window.
-  // Pure read; no side effects. Re-runs the sale matcher on each candidate
-  // sale's listing_title so the bucket is based on the *current* alias /
-  // variant rules, not whatever the scraper happened to tag at scrape time.
-  // That means: add an alias today, refresh tomorrow, the matching improves
-  // without re-scraping.
-  void aliasRev; // dep so closures see updates when aliases change
+  // Reads matchedSales (pre-computed) so this stays cheap. Strict equality
+  // on the full canonical id — pricing only uses sales of the EXACT variant
+  // being priced (so a Dodgers Luffy entry doesn't get averaged with base
+  // Luffy sales).
   const estimateGradedPrice = (cardId, gradingCompany, grade, { days = 180, bgsBlack = null } = {}) => {
     if (!cardId || !gradingCompany || grade == null) return null;
     const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
     const company = String(gradingCompany).toUpperCase();
-    const matches = sales.filter(s => {
+    const matches = matchedSales.filter(s => {
       if ((s.grading_company || '').toUpperCase() !== company) return false;
       if (Number(s.grade) !== Number(grade)) return false;
       if (bgsBlack !== null && Boolean(s.bgs_black) !== Boolean(bgsBlack)) return false;
       const t = s.sale_date ? Date.parse(s.sale_date) : 0;
       if (!Number.isFinite(t) || t < cutoff) return false;
-      // Re-derive the sale's canonical id from its title + current rules.
-      // Strict equality on the full canonical id — pricing only uses sales
-      // of the EXACT variant being priced (so a Dodgers Luffy entry doesn't
-      // get averaged with base Luffy sales).
-      const m = matchSaleToCard(s.listing_title || '', s.card_id);
-      const effectiveId = m.canonicalId || s.card_id;
-      return effectiveId === cardId;
+      return s._effectiveCardId === cardId;
     });
     if (matches.length === 0) return null;
     const prices = matches.map(s => Number(s.sale_price)).filter(p => p > 0).sort((a, b) => a - b);
@@ -797,7 +811,7 @@ export default function App() {
         )}
         {view === 'sales' && (
           <SalesView
-            sales={sales}
+            sales={matchedSales}
             catalogIndex={catalogIndex}
             variantRev={variantRev}
             aliasRev={aliasRev}
@@ -905,30 +919,21 @@ export default function App() {
           collections={collections}
           watchEntry={watchlist.find(w => w.card_id === detailCid) || null}
           recentSales={(() => {
-            void aliasRev; // re-run when aliases change
-            // Strict variant matching: when the user opens a specific
-            // variant (e.g. EB02-010-dodgers), show ONLY sales whose
-            // effective canonical id equals that variant. When they open
-            // the base card (no variant suffix), show every variant under
-            // that displayId — base is the natural place to see the whole
-            // market for that card number.
+            // Strict variant matching when the user opens a specific
+            // variant; broad displayId matching when they open the base.
+            // Reads matchedSales (pre-computed once) so this stays cheap
+            // even with hundreds of sales.
             const openDisplayId = displayIdOf(detailCid);
             if (!openDisplayId) return [];
             const openIsBase = !variantSuffixOf(detailCid);
-            return sales
-              .map(s => {
-                const m = matchSaleToCard(s.listing_title || '', s.card_id);
-                const effectiveId = m.canonicalId || s.card_id;
-                return { sale: s, effectiveId, effectiveDisplayId: displayIdOf(effectiveId) };
-              })
-              .filter(({ effectiveId, effectiveDisplayId }) => {
-                if (effectiveDisplayId !== openDisplayId) return false;
+            return matchedSales
+              .filter(s => {
+                if (s._effectiveDisplayId !== openDisplayId) return false;
                 if (openIsBase) return true;
-                return effectiveId === detailCid;
+                return s._effectiveCardId === detailCid;
               })
-              .sort((a, b) => (b.sale.sale_date || '').localeCompare(a.sale.sale_date || ''))
-              .slice(0, 20)
-              .map(({ sale, effectiveId }) => ({ ...sale, _effectiveCardId: effectiveId }));
+              .sort((a, b) => (b.sale_date || '').localeCompare(a.sale_date || ''))
+              .slice(0, 20);
           })()}
           onLogSale={() => { setLogSaleFor({ card: detailCard }); }}
           onClose={() => setDetailCard(null)}
@@ -4653,17 +4658,17 @@ function SalesView({ sales, catalogIndex, variantRev = 0, aliasRev = 0, onAddSal
   const grades = useMemo(() => Array.from(new Set(sales.map(s => s.grade).filter(g => g != null).map(g => String(g)))).sort((a, b) => Number(b) - Number(a)), [sales]);
   const markets = useMemo(() => Array.from(new Set(sales.map(s => s.marketplace).filter(Boolean))).sort(), [sales]);
 
-  // Apply the live matcher to every sale so SalesView reflects current
-  // aliases + variant rules. The effective card_id (and its catalog lookup)
-  // are used everywhere downstream — display label, search-hay, filtering.
+  // SalesView receives sales already pre-matched at the App level
+  // (_effectiveCardId / _effectiveDisplayId on each row). All we do here
+  // is attach the catalog lookup for display labelling. Looking up
+  // separately keeps this cheap when catalogIndex changes (e.g. pre-errata
+  // toggle) without re-running the full matcher.
   const augmented = useMemo(() => {
     return sales.map(s => {
-      const m = matchSaleToCard(s.listing_title || '', s.card_id);
-      const effectiveId = m.canonicalId || s.card_id;
-      const effectiveCard = catalogIndex.get(effectiveId) || catalogIndex.get(s.card_id) || null;
-      return { ...s, _effectiveCardId: effectiveId, _effectiveCard: effectiveCard };
+      const effectiveCard = catalogIndex.get(s._effectiveCardId) || catalogIndex.get(s.card_id) || null;
+      return { ...s, _effectiveCard: effectiveCard };
     });
-  }, [sales, catalogIndex, aliasRev, variantRev]);
+  }, [sales, catalogIndex]);
 
   const filtered = useMemo(() => {
     const q = filterCard.trim().toLowerCase();
