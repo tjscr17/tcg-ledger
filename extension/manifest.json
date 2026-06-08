@@ -1,20 +1,27 @@
 {
   "manifest_version": 3,
   "name": "OPTCG Ledger — 130point sync",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Syncs One Piece TCG sold listings from 130point.com into your OPTCG Ledger Supabase. Uses your browser's existing Cloudflare clearance — no proxies, no scraping infrastructure required.",
   "permissions": [
     "storage",
-    "alarms"
+    "tabs",
+    "scripting"
   ],
   "host_permissions": [
     "https://130point.com/*",
     "https://*.supabase.co/*"
   ],
   "background": {
-    "service_worker": "background.js",
-    "type": "module"
+    "service_worker": "background.js"
   },
+  "content_scripts": [
+    {
+      "matches": ["https://130point.com/*"],
+      "js": ["parser.js", "content.js"],
+      "run_at": "document_idle"
+    }
+  ],
   "action": {
     "default_popup": "popup.html",
     "default_title": "OPTCG Ledger sync"

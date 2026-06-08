@@ -1,38 +1,28 @@
-// OPTCG Ledger 130point sync — background service worker (manifest v3).
+// OPTCG Ledger 130point sync — background service worker.
 //
-// Architecture: this script is the orchestrator. The popup sends a SYNC
-// message; we pull the list of cards the user owns from Supabase, query
-// 130point.com for each unique displayId (with the user's existing cookies
-// and Cloudflare clearance), parse the response with parser.js, and upsert
-// the resulting rows into the `sales` table.
+// Architecture: the SW orchestrates the sync but DOES NOT fetch 130point
+// directly. Cloudflare rejects requests originating from chrome-extension://
+// (cross-site) even with cf_clearance attached. So we delegate each fetch
+// to the content script running inside a real 130point.com tab — the
+// browser then sends those requests with sec-fetch-site=same-origin and
+// Cloudflare treats them as normal page navigations.
 //
-// Why a service worker (not Vercel) does the fetching: 130point is behind
-// Cloudflare; AWS / Vercel IPs are flagged as datacenter traffic and bounced
-// off the JS challenge. The user's browser already holds a valid
-// cf_clearance cookie from normal browsing, so fetch() from the extension's
-// origin reuses it automatically.
+// Flow:
+//   popup → SW (RUN_SYNC) → ensure130pointTab() → for each card:
+//     chrome.tabs.sendMessage(tab.id, FETCH_AND_PARSE) → content.js
+//     → fetch(/api/search/html?q=...) → parseSearchResultsHtml()
+//     → JSON sales array back to SW → write to Supabase REST API.
 
-import { parseSearchResultsHtml } from './parser.js';
+const SEARCH_URL_PATH = (q) =>
+  `/api/search/html?q=${encodeURIComponent(q)}&sort=recent&mp=all`;
 
-const SEARCH_URL = (q) =>
-  `https://130point.com/api/search/html?q=${encodeURIComponent(q)}&sort=recent&mp=all`;
-
-// Polite per-query delay so we look like a person clicking through pages, not
-// a script. 130point's pages are heavy on the wire so spacing helps anyway.
 const QUERY_DELAY_MS = 1200;
-
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-// Pull current settings from chrome.storage.local. The popup writes these
-// once during initial setup.
 async function getSettings() {
   const { settings } = await chrome.storage.local.get('settings');
   return settings || null;
 }
-
-// REST helpers — Supabase exposes PostgREST over /rest/v1. We use the
-// vault_key as the partition column on every row (same convention as the
-// webapp's Supabase storage adapter).
 
 function supabaseHeaders(s) {
   return {
@@ -51,10 +41,6 @@ async function listEntries(s) {
 }
 
 async function insertSale(s, sale) {
-  // PostgREST: POST with on_conflict to upsert. We dedupe on
-  // (vault_key, listing_url) so re-syncing the same query doesn't write
-  // duplicate rows. Sales without listing_url don't have a stable identity,
-  // so we accept potential dupes for those rare cases.
   const url = `${s.supabaseUrl}/rest/v1/sales?on_conflict=vault_key,listing_url`;
   const r = await fetch(url, {
     method: 'POST',
@@ -67,36 +53,76 @@ async function insertSale(s, sale) {
   }
 }
 
-// Pull one search page from 130point, parse, return normalized sales.
-async function fetchSalesForQuery(query) {
-  const url = SEARCH_URL(query);
-  const r = await fetch(url, {
-    credentials: 'include',     // include cf_clearance + session cookies
-    headers: {
-      'accept': '*/*',
-      'accept-language': 'en-US,en;q=0.9',
-      'referer': 'https://130point.com/search',
-    },
-  });
-  if (!r.ok) throw new Error(`130point fetch ${r.status} for q=${query}`);
-  const html = await r.text();
-  // Service workers don't have DOMParser built-in until recent Chrome — use
-  // it via globalThis (Chrome 119+ has it). Fall back to regex if absent.
-  if (typeof DOMParser === 'undefined') {
-    throw new Error('DOMParser not available in this service worker. Use Chrome 119+.');
-  }
-  const doc = new DOMParser().parseFromString(html, 'text/html');
-  return parseSearchResultsHtml(doc);
+// Extract the base displayId from a canonical card_id. Handles:
+//   OP01-016                       → OP01-016
+//   OP01-016-parallel              → OP01-016
+//   OP01-016-manga-parallel        → OP01-016
+//   OP14RE:OP14-118                → OP14-118    (drops source-set prefix)
+//   OP14RE:OP14-118-parallel       → OP14-118
+//   OP01-016__pre-errata           → OP01-016    (legacy pre-2026-06-01 syntax)
+// Positively matches the displayId at the start, so variant suffixes never
+// confuse the extraction (unlike the buggy v0.1 greedy strip).
+function extractDisplayId(canonicalCardId) {
+  if (!canonicalCardId) return null;
+  let s = String(canonicalCardId).replace(/__pre-errata$/, '');
+  const colonIdx = s.indexOf(':');
+  if (colonIdx > -1) s = s.slice(colonIdx + 1);
+  const m = s.match(/^([A-Z]{2,4}\d{2}-[A-Z]?\d{2,3}[A-Z]?)/i);
+  return m ? m[1].toUpperCase() : null;
 }
 
-// Convert a parser-output sale into a Supabase `sales` row. Skips
-// non-matching / bundle / non-USD rows by returning null.
+// Find an existing 130point.com tab (so the manifest's content_script has
+// already been injected); fall back to creating one if none exists. We wait
+// for load and give Cloudflare a moment to drop cf_clearance before the
+// first /api/ call.
+async function ensure130pointTab() {
+  const existing = await chrome.tabs.query({ url: 'https://130point.com/*' });
+  if (existing.length > 0) {
+    // Verify the content script is loaded — sometimes it isn't (e.g. an
+    // older tab opened before the extension was installed). PING with a
+    // short timeout; if no reply, reload the tab so the content script
+    // injects.
+    const tab = existing[0];
+    const responded = await Promise.race([
+      chrome.tabs.sendMessage(tab.id, { type: 'PING' }).then(() => true).catch(() => false),
+      sleep(500).then(() => false),
+    ]);
+    if (responded) return tab;
+    await chrome.tabs.reload(tab.id);
+    await waitForTabLoad(tab.id);
+    await sleep(1500);
+    return tab;
+  }
+
+  const tab = await chrome.tabs.create({ url: 'https://130point.com/search', active: false });
+  await waitForTabLoad(tab.id);
+  await sleep(1500);
+  return tab;
+}
+
+function waitForTabLoad(tabId) {
+  return new Promise((resolve) => {
+    function listener(id, info) {
+      if (id === tabId && info.status === 'complete') {
+        chrome.tabs.onUpdated.removeListener(listener);
+        resolve();
+      }
+    }
+    chrome.tabs.onUpdated.addListener(listener);
+  });
+}
+
+// Ask the content script to fetch a 130point URL and return parsed sales.
+async function fetchAndParseInTab(tabId, path) {
+  return chrome.tabs.sendMessage(tabId, { type: 'FETCH_AND_PARSE', path });
+}
+
 function toSalesRow(s, parsed, queryCardId) {
-  if (!parsed.primary_card_id) return null;        // no card-id in title — drop
-  if (parsed.card_ids.length > 1) return null;     // bundle — drop
-  if (parsed.primary_card_id !== queryCardId) return null; // wrong card hit by search
-  if (parsed.currency !== 'USD') return null;      // FX deferred; USD-only for now
-  if (!parsed.sale_date) return null;              // need a date for windowing
+  if (!parsed.primary_card_id) return null;
+  if (parsed.card_ids.length > 1) return null;
+  if (parsed.primary_card_id !== queryCardId) return null;
+  if (parsed.currency !== 'USD') return null;
+  if (!parsed.sale_date) return null;
 
   return {
     vault_key: s.vaultKey,
@@ -115,48 +141,62 @@ function toSalesRow(s, parsed, queryCardId) {
   };
 }
 
-// Sync orchestrator — called by the popup. Reports progress via runtime
-// messages so the popup can show a live counter.
 async function runSync() {
   const settings = await getSettings();
   if (!settings) throw new Error('Configure Supabase URL + key + vault first.');
 
   const entries = await listEntries(settings);
   const uniqueDisplayIds = Array.from(new Set(
-    entries
-      .map(e => (e.card_id || '').replace(/-(parallel|manga|pre-errata|.*-.*)$/i, ''))
-      .filter(Boolean)
+    entries.map(e => extractDisplayId(e.card_id)).filter(Boolean)
   )).sort();
+  if (uniqueDisplayIds.length === 0) {
+    throw new Error('No graded card entries found to sync.');
+  }
 
-  const total = uniqueDisplayIds.length;
-  postProgress({ phase: 'started', total, done: 0, inserted: 0 });
+  postProgress({ phase: 'started', total: uniqueDisplayIds.length, done: 0, inserted: 0 });
+  const tab = await ensure130pointTab();
+  console.info('[sync] using tab', tab.id, '— querying', uniqueDisplayIds.length, 'unique displayIds');
 
   let inserted = 0;
   const errors = [];
   for (let i = 0; i < uniqueDisplayIds.length; i++) {
     const cardId = uniqueDisplayIds[i];
+    const path = SEARCH_URL_PATH(`${cardId} one piece`);
     try {
-      const { sales: parsedSales } = await fetchSalesForQuery(`${cardId} one piece`);
-      for (const ps of parsedSales) {
+      const resp = await fetchAndParseInTab(tab.id, path);
+      if (!resp) {
+        throw new Error('content script returned no response (tab may have unloaded)');
+      }
+      if (!resp.ok) {
+        const why = resp.cloudflare
+          ? `Cloudflare challenge — open ${`https://130point.com/search`} in your browser, prove you're human if asked, then retry sync.`
+          : `130point fetch ${resp.status}${resp.error ? ' (' + resp.error + ')' : ''}`;
+        throw new Error(why);
+      }
+      for (const ps of resp.sales) {
         const row = toSalesRow(settings, ps, cardId);
         if (!row) continue;
-        await insertSale(settings, row);
-        inserted++;
+        try {
+          await insertSale(settings, row);
+          inserted++;
+        } catch (insertErr) {
+          console.warn('[sync] insert failed', cardId, ps.listing_url, insertErr);
+          errors.push({ cardId, message: `insert: ${insertErr.message}` });
+        }
       }
     } catch (e) {
       console.warn('[sync] error for', cardId, e);
       errors.push({ cardId, message: e.message || String(e) });
     }
-    postProgress({ phase: 'progress', total, done: i + 1, inserted, current: cardId });
+    postProgress({ phase: 'progress', total: uniqueDisplayIds.length, done: i + 1, inserted, current: cardId });
     await sleep(QUERY_DELAY_MS);
   }
 
-  postProgress({ phase: 'done', total, done: total, inserted, errors });
+  postProgress({ phase: 'done', total: uniqueDisplayIds.length, done: uniqueDisplayIds.length, inserted, errors });
   return { inserted, errors };
 }
 
 function postProgress(msg) {
-  // Service workers can't directly update the popup DOM — broadcast.
   chrome.runtime.sendMessage({ type: 'SYNC_PROGRESS', payload: msg }).catch(() => {});
 }
 
@@ -165,10 +205,6 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     runSync()
       .then(result => sendResponse({ ok: true, result }))
       .catch(err => sendResponse({ ok: false, error: err.message || String(err) }));
-    return true; // keep the channel open for async
-  }
-  if (message?.type === 'PING') {
-    sendResponse({ ok: true });
-    return false;
+    return true;
   }
 });
