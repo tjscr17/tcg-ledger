@@ -118,15 +118,33 @@ async function fetchAndParseInTab(tabId, path) {
 }
 
 function toSalesRow(s, parsed, queryCardId) {
-  if (!parsed.primary_card_id) return null;
+  // Loosened post-v0.2: we accept any result with a usable date + USD price.
+  // The display-time matcher (webapp's sale-matcher.js) handles
+  // classification using current aliases + variant rules, so over-strict
+  // rejection at scrape time only drops data the user might later want.
+  //
+  // Skip rules (keep these — they prevent garbage):
+  //   - bundles (multiple distinct card-IDs)
+  //   - non-USD
+  //   - missing sale date
+  //
+  // Skip rule REMOVED:
+  //   - primary_card_id !== queryCardId
+  //     (titles often list the queried card alongside others, or the seller
+  //     describes the card without leading with its ID. The matcher can
+  //     still place these correctly via aliases or variant keywords.)
   if (parsed.card_ids.length > 1) return null;
-  if (parsed.primary_card_id !== queryCardId) return null;
   if (parsed.currency !== 'USD') return null;
   if (!parsed.sale_date) return null;
 
+  // Fall back to the queried card_id when the title doesn't carry one — the
+  // user searched for it, after all, so it's the best default.
+  const card_id = parsed.primary_canonical_id || parsed.primary_card_id || queryCardId;
+  if (!card_id) return null;
+
   return {
     vault_key: s.vaultKey,
-    card_id: parsed.primary_canonical_id || parsed.primary_card_id,
+    card_id,
     grading_company: parsed.grading_company,
     grade: parsed.grade,
     bgs_black: parsed.bgs_black,

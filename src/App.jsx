@@ -419,6 +419,40 @@ export default function App() {
     setSales(prev => prev.filter(s => s.id !== id));
   };
 
+  // Reclassify-all walks every sale, re-runs the matcher (current aliases +
+  // variant rules), and writes back any sale whose computed card_id differs
+  // from what's stored. Useful after the user adds a new alias or variant
+  // rule and wants the stored data to reflect the new classification so
+  // downstream SQL queries / exports see the same buckets as the UI.
+  const [reclassifyState, setReclassifyState] = useState(null);
+  const reclassifyAllSales = useCallback(async () => {
+    if (sales.length === 0) {
+      alert('No sales to reclassify.');
+      return;
+    }
+    setReclassifyState({ running: true, total: sales.length, done: 0, updated: 0, unchanged: 0 });
+    let updated = 0;
+    let unchanged = 0;
+    for (let i = 0; i < sales.length; i++) {
+      const s = sales[i];
+      try {
+        const m = matchSaleToCard(s.listing_title || '', s.card_id);
+        const newId = m.canonicalId || s.card_id;
+        if (newId !== s.card_id) {
+          await store.update('sales', s.id, { card_id: newId });
+          setSales(prev => prev.map(row => row.id === s.id ? { ...row, card_id: newId } : row));
+          updated++;
+        } else {
+          unchanged++;
+        }
+      } catch (e) {
+        console.warn('[reclassify] sale failed', s.id, e);
+      }
+      setReclassifyState(prev => prev ? { ...prev, done: i + 1, updated, unchanged } : null);
+    }
+    setReclassifyState(prev => prev ? { ...prev, running: false } : null);
+  }, [sales]);
+
   // estimateGradedPrice — median of matching sales in the recency window.
   // Pure read; no side effects. Re-runs the sale matcher on each candidate
   // sale's listing_title so the bucket is based on the *current* alias /
@@ -437,8 +471,9 @@ export default function App() {
       const t = s.sale_date ? Date.parse(s.sale_date) : 0;
       if (!Number.isFinite(t) || t < cutoff) return false;
       // Re-derive the sale's canonical id from its title + current rules.
-      // Falls back to the stored card_id when title-matching can't identify
-      // anything (preserves legacy sales that lack a title).
+      // Strict equality on the full canonical id — pricing only uses sales
+      // of the EXACT variant being priced (so a Dodgers Luffy entry doesn't
+      // get averaged with base Luffy sales).
       const m = matchSaleToCard(s.listing_title || '', s.card_id);
       const effectiveId = m.canonicalId || s.card_id;
       return effectiveId === cardId;
@@ -760,10 +795,13 @@ export default function App() {
             sales={sales}
             catalogIndex={catalogIndex}
             variantRev={variantRev}
+            aliasRev={aliasRev}
             onAddSale={() => setLogSaleFor({})}
             onEditSale={(s) => setLogSaleFor({ existing: s })}
             onRemoveSale={removeSale}
             onCardClick={setDetailCard}
+            onReclassifyAll={reclassifyAllSales}
+            reclassifyState={reclassifyState}
           />
         )}
       </main>
@@ -863,20 +901,26 @@ export default function App() {
           watchEntry={watchlist.find(w => w.card_id === detailCid) || null}
           recentSales={(() => {
             void aliasRev; // re-run when aliases change
-            // Re-classify each candidate sale using the current matcher
-            // (title + aliases + variant rules) and keep ones whose effective
-            // displayId equals the open card's. This means logged sales whose
-            // stored card_id is wrong show up correctly the moment you fix
-            // the rule or add an alias — no re-scrape required.
+            // Strict variant matching: when the user opens a specific
+            // variant (e.g. EB02-010-dodgers), show ONLY sales whose
+            // effective canonical id equals that variant. When they open
+            // the base card (no variant suffix), show every variant under
+            // that displayId — base is the natural place to see the whole
+            // market for that card number.
             const openDisplayId = displayIdOf(detailCid);
             if (!openDisplayId) return [];
+            const openIsBase = !variantSuffixOf(detailCid);
             return sales
               .map(s => {
                 const m = matchSaleToCard(s.listing_title || '', s.card_id);
                 const effectiveId = m.canonicalId || s.card_id;
                 return { sale: s, effectiveId, effectiveDisplayId: displayIdOf(effectiveId) };
               })
-              .filter(({ effectiveDisplayId }) => effectiveDisplayId === openDisplayId)
+              .filter(({ effectiveId, effectiveDisplayId }) => {
+                if (effectiveDisplayId !== openDisplayId) return false;
+                if (openIsBase) return true;
+                return effectiveId === detailCid;
+              })
               .sort((a, b) => (b.sale.sale_date || '').localeCompare(a.sale.sale_date || ''))
               .slice(0, 20)
               .map(({ sale, effectiveId }) => ({ ...sale, _effectiveCardId: effectiveId }));
@@ -4580,8 +4624,8 @@ function PriceCell({ label, value, tone, accent }) {
 // graded-pricing estimator. Filterable by card / grading company / grade /
 // marketplace / date range, and editable per-row. Adding a sale opens
 // LogSaleModal; editing one re-opens it with the existing row's data.
-function SalesView({ sales, catalogIndex, variantRev = 0, onAddSale, onEditSale, onRemoveSale, onCardClick }) {
-  void variantRev; // catalog name changes when variants are edited; re-render
+function SalesView({ sales, catalogIndex, variantRev = 0, aliasRev = 0, onAddSale, onEditSale, onRemoveSale, onCardClick, onReclassifyAll, reclassifyState }) {
+  void variantRev; void aliasRev; // catalog / alias changes → re-render
   const [filterCard, setFilterCard] = useStoredState('op:sales:filter:q', '');
   const [filterCompany, setFilterCompany] = useStoredState('op:sales:filter:company', 'all');
   const [filterGrade, setFilterGrade] = useStoredState('op:sales:filter:grade', 'all');
@@ -4592,24 +4636,36 @@ function SalesView({ sales, catalogIndex, variantRev = 0, onAddSale, onEditSale,
   const grades = useMemo(() => Array.from(new Set(sales.map(s => s.grade).filter(g => g != null).map(g => String(g)))).sort((a, b) => Number(b) - Number(a)), [sales]);
   const markets = useMemo(() => Array.from(new Set(sales.map(s => s.marketplace).filter(Boolean))).sort(), [sales]);
 
+  // Apply the live matcher to every sale so SalesView reflects current
+  // aliases + variant rules. The effective card_id (and its catalog lookup)
+  // are used everywhere downstream — display label, search-hay, filtering.
+  const augmented = useMemo(() => {
+    return sales.map(s => {
+      const m = matchSaleToCard(s.listing_title || '', s.card_id);
+      const effectiveId = m.canonicalId || s.card_id;
+      const effectiveCard = catalogIndex.get(effectiveId) || catalogIndex.get(s.card_id) || null;
+      return { ...s, _effectiveCardId: effectiveId, _effectiveCard: effectiveCard };
+    });
+  }, [sales, catalogIndex, aliasRev, variantRev]);
+
   const filtered = useMemo(() => {
     const q = filterCard.trim().toLowerCase();
     const cutoff = days === 'all' ? 0 : Date.now() - Number(days) * 24 * 60 * 60 * 1000;
-    return sales
+    return augmented
       .filter(s => {
         if (filterCompany !== 'all' && (s.grading_company || '') !== filterCompany) return false;
         if (filterGrade !== 'all' && String(s.grade) !== filterGrade) return false;
         if (filterMarket !== 'all' && (s.marketplace || '') !== filterMarket) return false;
         if (cutoff && s.sale_date && Date.parse(s.sale_date) < cutoff) return false;
         if (q) {
-          const card = catalogIndex.get(s.card_id);
-          const hay = `${s.card_id} ${card?.name || ''} ${card?.displayId || ''} ${s.listing_title || ''}`.toLowerCase();
+          const card = s._effectiveCard;
+          const hay = `${s._effectiveCardId} ${s.card_id} ${card?.name || ''} ${card?.displayId || ''} ${s.listing_title || ''}`.toLowerCase();
           if (!hay.includes(q)) return false;
         }
         return true;
       })
       .sort((a, b) => (b.sale_date || '').localeCompare(a.sale_date || ''));
-  }, [sales, filterCard, filterCompany, filterGrade, filterMarket, days, catalogIndex]);
+  }, [augmented, filterCard, filterCompany, filterGrade, filterMarket, days]);
 
   const totalValue = filtered.reduce((acc, s) => acc + (Number(s.sale_price) || 0), 0);
 
@@ -4624,11 +4680,34 @@ function SalesView({ sales, catalogIndex, variantRev = 0, onAddSale, onEditSale,
           </div>
         </div>
         <div className="op-page-head-actions">
+          {onReclassifyAll && (
+            <button
+              className="op-btn-ghost"
+              onClick={onReclassifyAll}
+              disabled={reclassifyState?.running}
+              title="Re-run the matcher (aliases + variant rules) against every sale's listing title and write back the corrected card_id. Use after adding new aliases or variant rules."
+            >
+              {reclassifyState?.running
+                ? <Loader2 size={15} className="op-spin" />
+                : <RefreshCw size={15} />}
+              {reclassifyState?.running
+                ? ` Reclassifying ${reclassifyState.done}/${reclassifyState.total}…`
+                : ' Reclassify all'}
+            </button>
+          )}
           <button className="op-btn-primary" onClick={onAddSale}>
             <Plus size={16} /> Log a sale
           </button>
         </div>
       </div>
+      {reclassifyState && !reclassifyState.running && reclassifyState.updated > 0 && (
+        <div className="op-resolve-diag is-ok" style={{ marginTop: 8 }}>
+          <div className="op-resolve-diag-row">
+            <span>Last reclassify</span>
+            <strong>✓ {reclassifyState.updated} sales updated · {reclassifyState.unchanged} unchanged</strong>
+          </div>
+        </div>
+      )}
 
       <div className="op-sales-toolbar">
         <input
@@ -4684,8 +4763,16 @@ function SalesView({ sales, catalogIndex, variantRev = 0, onAddSale, onEditSale,
       ) : (
         <div className="op-sales-list">
           {filtered.map(s => {
-            const card = catalogIndex.get(s.card_id);
-            const cardLabel = card ? `${card.displayId || card.id} · ${card.name}` : s.card_id;
+            // Display the effective match (post-matcher) rather than the
+            // scraper's stored card_id — so an alias added today fixes the
+            // label here too. The stored id is kept as a fallback tag if
+            // they differ so the user can spot reclassifications at a
+            // glance and decide whether to commit them via the
+            // Reclassify button.
+            const card = s._effectiveCard;
+            const cardLabel = card ? `${card.displayId || card.id} · ${card.name}` : s._effectiveCardId;
+            const reclassified = s._effectiveCardId !== s.card_id;
+            const variantSuffix = variantSuffixOf(s._effectiveCardId);
             return (
               <div key={s.id} className="op-sales-row">
                 <div className="op-sales-row-main">
@@ -4698,6 +4785,7 @@ function SalesView({ sales, catalogIndex, variantRev = 0, onAddSale, onEditSale,
                     {cardLabel}
                   </button>
                   <div className="op-sales-row-meta">
+                    <span className="op-tag op-tag-variant">{variantSuffix || 'base'}</span>
                     {s.grading_company && (
                       <span className="op-tag op-tag-grade">
                         {s.grading_company} {s.grade}{s.bgs_black ? ' BLK' : ''}
@@ -4706,6 +4794,11 @@ function SalesView({ sales, catalogIndex, variantRev = 0, onAddSale, onEditSale,
                     <span className="op-tag op-tag-market">{s.marketplace}</span>
                     {s.cert_number && <span className="op-tag">cert {s.cert_number}</span>}
                     {s.source && s.source !== 'manual' && <span className="op-tag">via {s.source}</span>}
+                    {reclassified && (
+                      <span className="op-tag" title={`Stored as ${s.card_id}; matcher now classifies as ${s._effectiveCardId}. Run 'Reclassify' to commit.`}>
+                        ⟳ reclassified
+                      </span>
+                    )}
                   </div>
                   {s.listing_title && <div className="op-sales-row-title">{s.listing_title}</div>}
                   {s.notes && <div className="op-sales-row-notes">{s.notes}</div>}
