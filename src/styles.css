@@ -1242,6 +1242,27 @@ body { background: var(--paper); }
   margin-left: 6px;
 }
 
+/* Aliases — nickname pills in the card detail drawer. Visually similar to
+   variant pills (op-variant-pill) but with a distinct accent so users can
+   tell at a glance whether a chip is a system-detected variant or a
+   user-added nickname. */
+.op-alias-edit { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
+.op-alias-pills { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; min-height: 24px; }
+.op-alias-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: rgba(61, 122, 74, 0.08);
+  border: 1px solid rgba(61, 122, 74, 0.3);
+  color: var(--jade);
+  font-size: 12px;
+  font-weight: 600;
+}
+.op-alias-add-row { display: flex; gap: 6px; align-items: center; }
+.op-alias-add-row .op-input { flex: 1; }
+
 .op-empty-state {
   text-align: center;
   padding: 40px 24px;

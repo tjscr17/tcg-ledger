@@ -15,12 +15,21 @@ const STORAGE_KEY = 'optcg:variants:v1';
 
 // Builtins are baked in as defaults. They show in the manager as locked
 // entries; users can add/remove their own alongside.
+//
+// Two regexes per attribute:
+//   value     — matches TCGPlayer product `name` (and OPTCGAPI card_name).
+//               TCGPlayer is consistent with parenthesized labels like
+//               "(Manga Rare)", so the catalog patterns lean on the parens.
+//   saleValue — matches free-text eBay / 130point listing titles, where
+//               sellers write "Manga Parallel" / "Dodgers Luffy" without
+//               parens. Falls back to `value` if unset.
 const BUILTINS = [
   {
     key: 'parallel',
     label: 'Parallel',
     mode: 'regex',
     value: '\\(Parallel\\)|\\(Alternate Art\\)|\\(Alt[- ]Art\\)|\\(Alternate\\)|\\(Special\\)|\\(SP\\)',
+    saleValue: '\\bParallel\\b|\\bAlt(?:ernate)?\\s+Art\\b|\\bAlt[- ]Art\\b',
     builtin: true,
   },
   {
@@ -28,21 +37,66 @@ const BUILTINS = [
     label: 'Manga',
     mode: 'regex',
     value: '\\(Manga Rare\\)|\\(Manga\\)',
+    saleValue: '\\bManga\\s+(?:Rare|Parallel|Variant)\\b|\\b(?:Rare|Parallel|Variant)\\s+Manga\\b',
+    builtin: true,
+  },
+  // Special-edition promo variants ship as builtins so common cards
+  // (Dodgers Luffy, Anniversary alts, judge promos) match listing titles
+  // out of the box. Each saleValue is permissive enough to catch the
+  // standard ways sellers describe these printings.
+  {
+    key: 'dodgers',
+    label: 'Dodgers Promo',
+    mode: 'regex',
+    value: '\\bDodgers\\b',
+    saleValue: '\\bDodgers\\b|\\bLA\\s+Dodgers\\b',
+    builtin: true,
+  },
+  {
+    key: 'anniversary',
+    label: 'Anniversary',
+    mode: 'regex',
+    value: '\\bAnniversary\\b',
+    saleValue: '\\bAnniversary\\b|\\b\\d+(?:st|nd|rd|th)\\s+Ann(?:iv)?\\b',
+    builtin: true,
+  },
+  {
+    key: 'aniplex',
+    label: 'Aniplex',
+    mode: 'regex',
+    value: '\\bAniplex\\b',
+    saleValue: '\\bAniplex\\b',
+    builtin: true,
+  },
+  {
+    key: 'judge',
+    label: 'Judge Promo',
+    mode: 'regex',
+    value: '\\bJudge\\b',
+    saleValue: '\\bJudge(?:\\s+(?:Promo|Reward|Edition))?\\b',
+    builtin: true,
+  },
+  {
+    key: 'championship',
+    label: 'Championship',
+    mode: 'regex',
+    value: '\\bChampionship\\b',
+    saleValue: '\\bChampionship\\b',
     builtin: true,
   },
 ];
 
 // Compile an entry's pattern into a case-insensitive RegExp. Text-mode values
 // are escaped so they match literally; regex-mode values are taken as-is.
-const compile = (entry) => {
+const compile = (entry, key = 'value') => {
   try {
+    const raw = entry[key];
+    if (!raw) return null;
     if (entry.mode === 'text') {
-      const escaped = String(entry.value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      if (!escaped) return null;
+      const escaped = String(raw).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       return new RegExp(escaped, 'i');
     }
-    if (!entry.value) return null;
-    return new RegExp(entry.value, 'i');
+    return new RegExp(raw, 'i');
   } catch {
     return null;
   }
@@ -67,7 +121,11 @@ let compiled = null;
 const rebuild = () => {
   const all = [...BUILTINS, ...loadUserEntries()];
   compiled = all
-    .map(e => ({ ...e, _re: compile(e) }))
+    .map(e => ({
+      ...e,
+      _re: compile(e, 'value'),
+      _saleRe: compile(e, 'saleValue') || compile(e, 'value'),
+    }))
     .filter(e => e._re);
 };
 
@@ -85,11 +143,20 @@ export const detectPrintingAttributes = (name) => {
   return compiled.filter(a => a._re.test(name)).map(a => a.key);
 };
 
+// Public: same as detectPrintingAttributes but uses the looser sale-title
+// pattern (saleValue) per attribute. Used by the sale matcher against
+// free-text eBay / 130point listing titles.
+export const detectPrintingAttributesFromTitle = (title) => {
+  if (!title) return [];
+  if (!compiled) rebuild();
+  return compiled.filter(a => a._saleRe.test(title)).map(a => a.key);
+};
+
 // Public: lookup a single attribute by key (mostly for label rendering).
 export const printingAttribute = (key) => {
   if (!compiled) rebuild();
   const hit = compiled.find(a => a.key === key);
-  return hit ? { key: hit.key, label: hit.label, mode: hit.mode, value: hit.value, builtin: hit.builtin } : null;
+  return hit ? { key: hit.key, label: hit.label, mode: hit.mode, value: hit.value, saleValue: hit.saleValue, builtin: hit.builtin } : null;
 };
 
 // Stable string identifier for the current effective ruleset — used as part

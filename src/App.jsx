@@ -6,6 +6,11 @@ import { loadCatalog, groupBySet, compareSets, augmentWithErrata, hasPreErrata, 
 import { hasPsaToken, fetchCert, fetchAuctionPrices, findCandidateCards } from './psa.js';
 import { runCanonicalMigration, runPcCleanup, runTcgplayerMigration, runClearLegacyResolutions } from './migrate.js';
 import {
+  getAliasesForCard, addCardAlias, removeCardAlias,
+  onCardAliasesChanged, hydrateFromShared as hydrateAliasesFromShared,
+} from './card-aliases.js';
+import { matchSaleToCard } from './sale-matcher.js';
+import {
   getMarketPriceForCard, ensurePriceForCard, onPriceResolved,
   getCachedImageForCard,
   hydrateResolutionsFromShared, subscribeToSharedResolutions, whenResolutionsReady,
@@ -222,14 +227,21 @@ export default function App() {
   // create ~10 duplicate Main Collections in one minute.
   const didAutoSeedRef = useRef(false);
 
+  // Bumps whenever the alias store changes — used by useMemo deps that
+  // depend on alias data (e.g. the drawer's recent-sales relabeler).
+  const [aliasRev, setAliasRev] = useState(0);
+  useEffect(() => onCardAliasesChanged(() => setAliasRev(r => r + 1)), []);
+
   const refreshData = useCallback(async () => {
-    const [cols, ents, txs, watches, salesRows] = await Promise.all([
+    const [cols, ents, txs, watches, salesRows, aliasRows] = await Promise.all([
       store.list('collections'),
       store.list('entries'),
       store.list('transactions').catch(() => []),
       store.list('watchlist').catch(() => []),
       store.list('sales').catch(() => []),
+      store.list('card_aliases').catch(() => []),
     ]);
+    hydrateAliasesFromShared(aliasRows);
     let cs = cols;
     // Auto-seed only when (a) collections AND every other data table are
     // empty (so we know the vault is genuinely fresh, not just suffering a
@@ -284,7 +296,8 @@ export default function App() {
     const unsubT = store.subscribe('transactions', refreshData);
     const unsubW = store.subscribe('watchlist', refreshData);
     const unsubS = store.subscribe('sales', refreshData);
-    return () => { unsubC(); unsubE(); unsubT(); unsubW(); unsubS(); };
+    const unsubA = store.subscribe('card_aliases', refreshData);
+    return () => { unsubC(); unsubE(); unsubT(); unsubW(); unsubS(); unsubA(); };
   }, [refreshData]);
 
   // erratTick bumps whenever the user toggles a pre-errata mark so the
@@ -407,21 +420,28 @@ export default function App() {
   };
 
   // estimateGradedPrice — median of matching sales in the recency window.
-  // Pure read; no side effects. Matches on canonical card_id +
-  // grading_company + grade (with optional bgs_black distinction so BGS 10
-  // Black Label doesn't get averaged with regular BGS 10). Returns null
-  // when there are no matching sales.
+  // Pure read; no side effects. Re-runs the sale matcher on each candidate
+  // sale's listing_title so the bucket is based on the *current* alias /
+  // variant rules, not whatever the scraper happened to tag at scrape time.
+  // That means: add an alias today, refresh tomorrow, the matching improves
+  // without re-scraping.
+  void aliasRev; // dep so closures see updates when aliases change
   const estimateGradedPrice = (cardId, gradingCompany, grade, { days = 180, bgsBlack = null } = {}) => {
     if (!cardId || !gradingCompany || grade == null) return null;
     const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
     const company = String(gradingCompany).toUpperCase();
     const matches = sales.filter(s => {
-      if (s.card_id !== cardId) return false;
       if ((s.grading_company || '').toUpperCase() !== company) return false;
       if (Number(s.grade) !== Number(grade)) return false;
       if (bgsBlack !== null && Boolean(s.bgs_black) !== Boolean(bgsBlack)) return false;
       const t = s.sale_date ? Date.parse(s.sale_date) : 0;
-      return Number.isFinite(t) && t >= cutoff;
+      if (!Number.isFinite(t) || t < cutoff) return false;
+      // Re-derive the sale's canonical id from its title + current rules.
+      // Falls back to the stored card_id when title-matching can't identify
+      // anything (preserves legacy sales that lack a title).
+      const m = matchSaleToCard(s.listing_title || '', s.card_id);
+      const effectiveId = m.canonicalId || s.card_id;
+      return effectiveId === cardId;
     });
     if (matches.length === 0) return null;
     const prices = matches.map(s => Number(s.sale_price)).filter(p => p > 0).sort((a, b) => a - b);
@@ -842,17 +862,24 @@ export default function App() {
           collections={collections}
           watchEntry={watchlist.find(w => w.card_id === detailCid) || null}
           recentSales={(() => {
-            // Match sales to the open card by *displayId* (e.g. OP01-016)
-            // rather than full canonical id, so opening the parallel printing
-            // also surfaces sales tagged base / manga / pre-errata. The user
-            // wants market context for the whole card-number family, not
-            // just the one variant the entry happens to be tagged with.
+            void aliasRev; // re-run when aliases change
+            // Re-classify each candidate sale using the current matcher
+            // (title + aliases + variant rules) and keep ones whose effective
+            // displayId equals the open card's. This means logged sales whose
+            // stored card_id is wrong show up correctly the moment you fix
+            // the rule or add an alias — no re-scrape required.
             const openDisplayId = displayIdOf(detailCid);
             if (!openDisplayId) return [];
             return sales
-              .filter(s => displayIdOf(s.card_id) === openDisplayId)
-              .sort((a, b) => (b.sale_date || '').localeCompare(a.sale_date || ''))
-              .slice(0, 20);
+              .map(s => {
+                const m = matchSaleToCard(s.listing_title || '', s.card_id);
+                const effectiveId = m.canonicalId || s.card_id;
+                return { sale: s, effectiveId, effectiveDisplayId: displayIdOf(effectiveId) };
+              })
+              .filter(({ effectiveDisplayId }) => effectiveDisplayId === openDisplayId)
+              .sort((a, b) => (b.sale.sale_date || '').localeCompare(a.sale.sale_date || ''))
+              .slice(0, 20)
+              .map(({ sale, effectiveId }) => ({ ...sale, _effectiveCardId: effectiveId }));
           })()}
           onLogSale={() => { setLogSaleFor({ card: detailCard }); }}
           onClose={() => setDetailCard(null)}
@@ -4190,6 +4217,35 @@ function CardDetailDrawer({ card, entries, collections, watchEntry, recentSales 
   // the drawer (the pricing.js / catalog effective attribute lookups read
   // from the override store directly, so we just need a re-render trigger).
   useEffect(() => onCardAttributeOverridesChanged(() => bumpResolutionTick()), []);
+  // Same idea for aliases — getAliasesForCard reads the in-memory map
+  // directly, so an alias add/remove just needs a bump to re-render.
+  useEffect(() => onCardAliasesChanged(() => bumpResolutionTick()), []);
+
+  // Local UI state for the add-alias input. Hidden by default; shown when
+  // the user clicks "+ Add alias".
+  const [aliasInput, setAliasInput] = useState('');
+  const [aliasError, setAliasError] = useState('');
+  const [showAliasInput, setShowAliasInput] = useState(false);
+  const aliases = getAliasesForCard(cid);
+
+  const handleAddAlias = async () => {
+    const trimmed = aliasInput.trim();
+    if (!trimmed) { setAliasError('alias cannot be empty'); return; }
+    if (trimmed.length < 3) { setAliasError('alias must be at least 3 characters'); return; }
+    // Soft warning for very common single-word aliases — the matcher would
+    // catch every listing containing the word, which is almost certainly
+    // not what the user wants.
+    if (trimmed.split(/\s+/).length === 1 && trimmed.length < 6) {
+      if (!confirm(`"${trimmed}" is a short single-word alias — it'll match every listing containing this word. Add it anyway?`)) {
+        return;
+      }
+    }
+    const result = await addCardAlias(cid, trimmed);
+    if (!result.ok) { setAliasError(result.error || 'failed to add'); return; }
+    setAliasInput('');
+    setAliasError('');
+    setShowAliasInput(false);
+  };
 
   // Classifications section state.
   const detectedAttrs = Array.isArray(card.attributes) ? card.attributes : [];
@@ -4280,6 +4336,49 @@ function CardDetailDrawer({ card, entries, collections, watchEntry, recentSales 
                 </select>
               </div>
             )}
+          </div>
+
+          <div className="op-section-title">
+            <Receipt size={15} /> Aliases
+            <span className="op-section-sub">(nicknames used to match this card in listing titles)</span>
+          </div>
+          <div className="op-alias-edit">
+            <div className="op-alias-pills">
+              {aliases.length === 0 ? (
+                <span className="op-resolve-side-sub">No aliases yet — add a nickname like "Dodgers Luffy" or "Gear 5" if sellers describe this card without using its card-ID.</span>
+              ) : aliases.map(a => (
+                <span key={a} className="op-alias-pill">
+                  {a}
+                  <button
+                    className="op-variant-pill-x"
+                    onClick={() => removeCardAlias(cid, a)}
+                    title="Remove alias"
+                  >×</button>
+                </span>
+              ))}
+            </div>
+            {showAliasInput ? (
+              <div className="op-alias-add-row">
+                <input
+                  className="op-input"
+                  autoFocus
+                  placeholder="e.g. Dodgers Luffy, LA Luffy, Gear 5"
+                  value={aliasInput}
+                  onChange={(e) => { setAliasInput(e.target.value); setAliasError(''); }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') handleAddAlias();
+                    if (e.key === 'Escape') { setShowAliasInput(false); setAliasInput(''); setAliasError(''); }
+                  }}
+                />
+                <button className="op-btn-ghost" onClick={handleAddAlias}>Add</button>
+                <button className="op-btn-ghost" onClick={() => { setShowAliasInput(false); setAliasInput(''); setAliasError(''); }}>Cancel</button>
+              </div>
+            ) : (
+              <div className="op-variant-edit-add">
+                <button className="op-btn-ghost" onClick={() => setShowAliasInput(true)}>+ Add alias…</button>
+              </div>
+            )}
+            {aliasError && <div className="op-error">{aliasError}</div>}
           </div>
 
           <div className="op-section-title">
@@ -4384,7 +4483,9 @@ function CardDetailDrawer({ card, entries, collections, watchEntry, recentSales 
               </div>
               <div className="op-drawer-sales">
                 {recentSales.map(s => {
-                  const variant = variantSuffixOf(s.card_id);
+                  // Prefer the live-matched canonical id (handles aliases +
+                  // current variant rules) over whatever the scraper stored.
+                  const variant = variantSuffixOf(s._effectiveCardId || s.card_id);
                   return (
                     <div key={s.id} className="op-drawer-sale-row">
                       <div className="op-drawer-sale-meta">

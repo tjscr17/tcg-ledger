@@ -166,6 +166,30 @@ const solo = {
 //   --     add constraint sales_vault_key_listing_url_unique
 //   --     unique (vault_key, listing_url);
 //   --   notify pgrst, 'reload schema';
+//
+//   -- card_aliases — user-defined nicknames the sale matcher uses to
+//   -- identify a card from a listing title that has no parseable card-ID
+//   -- (e.g. "LA Dodgers Luffy 2025 Promo PSA 10"). Each alias is tied to a
+//   -- specific canonical card_id; the matcher uses the longest matching
+//   -- alias substring in a title to pick the card.
+//   --
+//   --   create table card_aliases (
+//   --     id uuid primary key default gen_random_uuid(),
+//   --     vault_key text not null,
+//   --     card_id text not null,
+//   --     alias text not null,
+//   --     created_at timestamptz default now()
+//   --   );
+//   --   create index on card_aliases (vault_key);
+//   --   create index on card_aliases (vault_key, lower(alias));
+//   --   alter table card_aliases
+//   --     add constraint card_aliases_vault_card_alias_unique
+//   --     unique (vault_key, card_id, alias);
+//   --   alter publication supabase_realtime add table card_aliases;
+//   --   alter table card_aliases enable row level security;
+//   --   create policy "vault read aliases"  on card_aliases for select using (true);
+//   --   create policy "vault write aliases" on card_aliases for all using (true);
+//   --   notify pgrst, 'reload schema';
 //   create table entries (
 //     id uuid primary key default gen_random_uuid(),
 //     vault_key text not null,
