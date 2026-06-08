@@ -200,12 +200,20 @@ export default function App() {
       store.list('sales').catch(() => []),
     ]);
     let cs = cols;
-    if (cs.length === 0 && !didAutoSeedRef.current) {
+    // Auto-seed only when (a) collections AND every other data table are
+    // empty (so we know the vault is genuinely fresh, not just suffering a
+    // transient query blip), AND (b) we haven't already attempted a seed
+    // this session. Either condition alone is unsafe: an empty cols result
+    // by itself can be a network hiccup mid-sync, and the ref alone doesn't
+    // protect against the first call returning empty on race.
+    const vaultLooksGenuinelyEmpty =
+      cs.length === 0 && ents.length === 0 && txs.length === 0 && watches.length === 0 && salesRows.length === 0;
+    if (vaultLooksGenuinelyEmpty && !didAutoSeedRef.current) {
       didAutoSeedRef.current = true;
       const seed = await store.insert('collections', { id: uid(), name: 'Main Collection', created_at: new Date().toISOString() });
       cs = [seed].filter(Boolean);
-    } else if (cs.length > 0) {
-      didAutoSeedRef.current = true; // any non-empty result means we don't need to seed
+    } else if (cs.length > 0 || ents.length > 0 || txs.length > 0) {
+      didAutoSeedRef.current = true;
     }
     setCollections(cs);
     setEntries(ents);
