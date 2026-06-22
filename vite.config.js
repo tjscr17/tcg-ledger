@@ -7,6 +7,40 @@ export default defineConfig(({ mode }) => {
   return {
     plugins: [
       react(),
+      // Local-dev mirror of /api/img — same-origin proxy for official card art
+      // (browsers can't hotlink Bandai's CDN cross-origin; server-side works).
+      {
+        name: 'img-dev-proxy',
+        configureServer(server) {
+          server.middlewares.use('/api/img', async (req, res) => {
+            const url = new URL(req.url, 'http://localhost');
+            const card = (url.searchParams.get('card') || '').trim();
+            if (!/^[A-Za-z0-9_-]{1,40}$/.test(card)) {
+              res.statusCode = 400;
+              res.setHeader('Content-Type', 'application/json');
+              res.end(JSON.stringify({ error: 'card query param must be a card external_id' }));
+              return;
+            }
+            try {
+              const upstream = await fetch(`https://en.onepiece-cardgame.com/images/cardlist/card/${card}.png`, {
+                headers: {
+                  'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36',
+                  'Referer': 'https://en.onepiece-cardgame.com/cardlist/',
+                },
+              });
+              if (!upstream.ok) { res.statusCode = upstream.status; res.end(`upstream ${upstream.status}`); return; }
+              const buf = Buffer.from(await upstream.arrayBuffer());
+              res.setHeader('Content-Type', upstream.headers.get('content-type') || 'image/png');
+              res.setHeader('Cache-Control', 'public, max-age=86400');
+              res.statusCode = 200;
+              res.end(buf);
+            } catch (e) {
+              res.statusCode = 502;
+              res.end(`img proxy failed: ${e.message || e}`);
+            }
+          });
+        },
+      },
       // Local-dev mirror of the Vercel /api/psa serverless function so PSA
       // lookups work the same in `npm run dev` as in production.
       {

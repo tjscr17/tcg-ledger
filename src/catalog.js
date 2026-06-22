@@ -35,7 +35,7 @@ const CATALOG_URL = 'https://ajpxzfhmyzzgarewijnr.supabase.co';
 const CATALOG_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFqcHh6ZmhteXp6Z2FyZXdpam5yIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzkxNTM3MjQsImV4cCI6MjA5NDcyOTcyNH0.YQ4V0pxw1tpOiVe_d9nxL0UqbHR-eFPTjiybpd2O28o';
 const catalogClient = createClient(CATALOG_URL, CATALOG_KEY);
 
-const CACHE_KEY = 'optcg:catalog:v12-supabase'; // bump invalidates old TCGCSV cache
+const CACHE_KEY = 'optcg:catalog:v13-supabase'; // v13: imageUrl now routes via /api/img proxy
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24h
 const LANGUAGE = 'EN'; // catalog is EN-West for now; other langs exist in DB
 const PAGE = 1000; // PostgREST default max rows per request
@@ -49,6 +49,8 @@ const normalize = (row) => {
   const set = row.sets || {};
   const variant = row.variant_key || 'base';
   const isBase = variant === 'base';
+  // external_id (printing image filename): card_code, or card_code_pN/_rN.
+  const eid = isBase ? (row.card_code || '') : `${row.card_code || ''}_${variant}`;
   const card = {
     id: row.id,                       // UUID — the identity
     canonicalId: row.id,              // identity used as stored card_id
@@ -62,7 +64,8 @@ const normalize = (row) => {
     setAbbreviation: set.set_code || '',
     rarity: row.rarity || '',
     category: row.category || '',
-    imageUrl: row.image_url || '',
+    // Same-origin proxy (api/img) — browsers can't hotlink Bandai's CDN directly.
+    imageUrl: eid ? `/api/img?card=${encodeURIComponent(eid)}` : '',
     tcgplayerUrl: '',
     // Pricing deferred — no source yet. Kept as 0 so price reads stay graceful.
     tcg_id: 0,
