@@ -164,12 +164,22 @@ const CONDITIONS = ['Mint', 'Near Mint', 'Lightly Played', 'Moderately Played', 
 // longer auto-fetches graded prices, so these only populate the dropdowns
 // in AddCardModal's grading section. Half-grades only meaningful at 9.5.
 const GRADING_COMPANIES = ['PSA', 'BGS', 'CGC'];
-const GRADES_BY_COMPANY = {
-  PSA: [10, 9.5, 9, 8, 7],
-  BGS: [10, 9.5, 9, 8, 7],
-  CGC: [10, 9.5, 9, 8, 7],
-  SGC: [10, 9.5, 9, 8, 7],
+// Grade scales mirror the public.grades reference table exactly. PSA has no .5
+// above 9 and tops out at 10; BGS/CGC carry every half-step plus a "special"
+// top grade (BGS Black Label / CGC Pristine). The `special` flag round-trips to
+// the bgs_black column, which storage.js maps to the 'BGS 10 Black Label' /
+// 'CGC 10 Pristine' grade_codes.
+const mkGrades = (vals) => vals.map(v => ({ grade: v, special: false }));
+const BGS_CGC_SCALE = [10, 9.5, 9, 8.5, 8, 7.5, 7, 6.5, 6, 5.5, 5, 4.5, 4, 3.5, 3, 2.5, 2, 1.5, 1];
+const GRADE_OPTIONS_BY_COMPANY = {
+  PSA: mkGrades([10, 9, 8.5, 8, 7.5, 7, 6.5, 6, 5.5, 5, 4.5, 4, 3.5, 3, 2.5, 2, 1.5, 1]),
+  BGS: [{ grade: 10, special: true }, ...mkGrades(BGS_CGC_SCALE)],
+  CGC: [{ grade: 10, special: true }, ...mkGrades(BGS_CGC_SCALE)],
 };
+const specialGradeName = (company) => (company === 'CGC' ? 'Pristine' : 'Black Label');
+const gradeOptionLabel = (company, opt) => (opt.special ? `${opt.grade} ${specialGradeName(company)}` : String(opt.grade));
+const gradeOptionValue = (opt) => `${opt.grade}${opt.special ? ':S' : ''}`;
+const parseGradeOptionValue = (v) => ({ grade: Number(String(v).replace(':S', '')), special: String(v).endsWith(':S') });
 
 const uid = () => Math.random().toString(36).slice(2, 10);
 
@@ -2073,12 +2083,15 @@ function EntryRow({ entry, card, marketValue, marketKnown = true, expenses = 0, 
 }
 
 function GradingBadge({ company, grade, bgsBlack, gradeDescription }) {
-  const label = bgsBlack ? `${company} ${grade} BL` : `${company} ${grade}`;
+  // bgsBlack flags the top "special" grade: Black Label for BGS, Pristine for CGC.
+  const special = company === 'CGC' ? 'Pristine' : 'Black Label';
+  const abbr = company === 'CGC' ? 'PR' : 'BL';
+  const label = bgsBlack ? `${company} ${grade} ${abbr}` : `${company} ${grade}`;
   const classKey = bgsBlack ? 'bgs-black' : (company || '').toLowerCase();
   // Prefer the verbatim PSA grade description on hover when it's available
-  // ("GEM MT 10"); else fall back to "BGS 10 Black Label" or "PSA 10".
+  // ("GEM MT 10"); else fall back to "BGS 10 Black Label" / "CGC 10 Pristine".
   const titleText = bgsBlack
-    ? `${company} ${grade} Black Label (Perfect 10)`
+    ? `${company} ${grade} ${special}`
     : (gradeDescription || `${company} ${grade}`);
   return (
     <span className={`op-grade-badge is-${classKey}`} title={titleText}>
@@ -3066,7 +3079,7 @@ function TradeModal({ members = [], collection, entries = [], catalog = [], cata
         condition: i.condition,
         grading_company: i.graded ? i.grading_company : null,
         grade: i.graded ? i.grade : null,
-        bgs_black: Boolean(i.graded && i.grading_company === 'BGS' && Number(i.grade) === 10 && i.bgs_black),
+        bgs_black: Boolean(i.graded && i.bgs_black && Number(i.grade) === 10 && (i.grading_company === 'BGS' || i.grading_company === 'CGC')),
         cert_number: i.graded ? (i.cert_number?.trim() || null) : null,
         graded_price: i.graded ? (Number(i.graded_price) || null) : null,
       })),
@@ -3154,25 +3167,24 @@ function TradeModal({ members = [], collection, entries = [], catalog = [], cata
                 <>
                   <div className="op-form-row" style={{ gap: 8, marginTop: 6 }}>
                     <Field label="Company">
-                      <select value={i.grading_company} onChange={(e) => updateIncoming(i.key, { grading_company: e.target.value, bgs_black: false })}>
+                      <select value={i.grading_company} onChange={(e) => updateIncoming(i.key, { grading_company: e.target.value, grade: 10, bgs_black: false })}>
                         {GRADING_COMPANIES.map(c => <option key={c} value={c}>{c}</option>)}
                       </select>
                     </Field>
                     <Field label="Grade">
-                      <select value={i.grade} onChange={(e) => updateIncoming(i.key, { grade: Number(e.target.value) })}>
-                        {(GRADES_BY_COMPANY[i.grading_company] || []).map(g => <option key={g} value={g}>{g}</option>)}
+                      <select
+                        value={gradeOptionValue({ grade: i.grade, special: i.bgs_black })}
+                        onChange={(e) => { const o = parseGradeOptionValue(e.target.value); updateIncoming(i.key, { grade: o.grade, bgs_black: o.special }); }}
+                      >
+                        {(GRADE_OPTIONS_BY_COMPANY[i.grading_company] || []).map(o => (
+                          <option key={gradeOptionValue(o)} value={gradeOptionValue(o)}>{gradeOptionLabel(i.grading_company, o)}</option>
+                        ))}
                       </select>
                     </Field>
                     <Field label="Graded price">
                       <input type="number" step="0.01" value={i.graded_price} onChange={(e) => updateIncoming(i.key, { graded_price: e.target.value })} placeholder="0.00" />
                     </Field>
                   </div>
-                  {i.grading_company === 'BGS' && Number(i.grade) === 10 && (
-                    <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13, cursor: 'pointer', marginTop: 4 }}>
-                      <input type="checkbox" checked={i.bgs_black} onChange={(e) => updateIncoming(i.key, { bgs_black: e.target.checked })} />
-                      <span>Black Label (Perfect 10)</span>
-                    </label>
-                  )}
                   <Field label="Cert # (optional)">
                     <input type="text" value={i.cert_number} onChange={(e) => updateIncoming(i.key, { cert_number: e.target.value })} placeholder="e.g. 12345678" />
                   </Field>
@@ -4653,7 +4665,7 @@ function AddCardModal({ card, entry, collections, activeCollectionId, onClose, o
       acquired_at: acquiredAt || null,
       grading_company: isGraded ? gradingCompany : null,
       grade: isGraded ? Number(grade) : null,
-      bgs_black: Boolean(isGraded && gradingCompany === 'BGS' && Number(grade) === 10 && bgsBlack),
+      bgs_black: Boolean(isGraded && bgsBlack && Number(grade) === 10 && (gradingCompany === 'BGS' || gradingCompany === 'CGC')),
       cert_number: isGraded ? certNumber.trim() : '',
       graded_price: isGraded ? (Number(gradedPrice) || 0) : 0,
       // Legacy PriceCharting columns (pc_product_id, pc_product_name,
@@ -4769,14 +4781,17 @@ function AddCardModal({ card, entry, collections, activeCollectionId, onClose, o
 
                 <div className="op-form-row">
                   <Field label="Grading company">
-                    <select value={gradingCompany} onChange={(e) => setGradingCompany(e.target.value)}>
+                    <select value={gradingCompany} onChange={(e) => { setGradingCompany(e.target.value); setGrade(10); setBgsBlack(false); }}>
                       {GRADING_COMPANIES.map(c => <option key={c} value={c}>{c}</option>)}
                     </select>
                   </Field>
                   <Field label="Grade">
-                    <select value={grade} onChange={(e) => setGrade(Number(e.target.value))}>
-                      {(GRADES_BY_COMPANY[gradingCompany] || []).map(g => (
-                        <option key={g} value={g}>{g}</option>
+                    <select
+                      value={gradeOptionValue({ grade, special: bgsBlack })}
+                      onChange={(e) => { const o = parseGradeOptionValue(e.target.value); setGrade(o.grade); setBgsBlack(o.special); }}
+                    >
+                      {(GRADE_OPTIONS_BY_COMPANY[gradingCompany] || []).map(o => (
+                        <option key={gradeOptionValue(o)} value={gradeOptionValue(o)}>{gradeOptionLabel(gradingCompany, o)}</option>
                       ))}
                     </select>
                   </Field>
@@ -4784,13 +4799,6 @@ function AddCardModal({ card, entry, collections, activeCollectionId, onClose, o
                     <input type="text" placeholder="e.g. 12345678" value={certNumber} onChange={(e) => setCertNumber(e.target.value)} />
                   </Field>
                 </div>
-
-                {gradingCompany === 'BGS' && Number(grade) === 10 && (
-                  <label className="op-graded-toggle" style={{ marginBottom: 8 }}>
-                    <input type="checkbox" checked={bgsBlack} onChange={(e) => setBgsBlack(e.target.checked)} />
-                    <span>Black Label (Perfect 10 · all four subgrades = 10)</span>
-                  </label>
-                )}
 
                 <Field label="Graded market price (USD)">
                   <input
@@ -5076,7 +5084,7 @@ function CardDetailDrawer({ card, entries, collections, watchEntry, recentSales 
                           {isGraded && <GradingBadge company={entry.grading_company} grade={entry.grade} bgsBlack={entry.bgs_black} gradeDescription={entry.grade_description} />}
                         </div>
                         <div className="op-detail-entry-meta">
-                          {isGraded ? `${entry.grading_company} ${entry.grade}${entry.bgs_black ? ' Black Label' : ''}` : entry.condition} · Paid ${Number(entry.purchase_price || 0).toFixed(2)}
+                          {isGraded ? `${entry.grading_company} ${entry.grade}${entry.bgs_black ? (entry.grading_company === 'CGC' ? ' Pristine' : ' Black Label') : ''}` : entry.condition} · Paid ${Number(entry.purchase_price || 0).toFixed(2)}
                           {entry.acquired_at && <> · Acquired {entry.acquired_at}</>}
                         </div>
                         {isGraded && (

@@ -102,6 +102,7 @@ const gradeToCode = (company, grade, bgsBlack) => {
   const c = String(company || '').toUpperCase().trim();
   if (!c) return null; // ungraded / raw
   if (c === 'BGS' && bgsBlack && Number(grade) === 10) return 'BGS 10 Black Label';
+  if (c === 'CGC' && bgsBlack && Number(grade) === 10) return 'CGC 10 Pristine';
   if (grade === null || grade === undefined || grade === '') return null;
   const g = String(grade).replace(/\.0$/, '');
   return `${c} ${g}`;
@@ -109,7 +110,7 @@ const gradeToCode = (company, grade, bgsBlack) => {
 const codeToGrade = (code) => {
   if (!code || code === 'RAW') return { grading_company: '', grade: null, bgs_black: false };
   if (code === 'BGS 10 Black Label') return { grading_company: 'BGS', grade: 10, bgs_black: true };
-  if (code === 'CGC 10 Pristine') return { grading_company: 'CGC', grade: 10, bgs_black: false };
+  if (code === 'CGC 10 Pristine') return { grading_company: 'CGC', grade: 10, bgs_black: true };
   const m = /^([A-Za-z]+)\s+([\d.]+)$/.exec(code);
   if (m) return { grading_company: m[1].toUpperCase(), grade: Number(m[2]), bgs_black: false };
   return { grading_company: '', grade: null, bgs_black: false };
