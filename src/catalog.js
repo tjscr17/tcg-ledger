@@ -64,8 +64,11 @@ const normalize = (row) => {
     setAbbreviation: set.set_code || '',
     rarity: row.rarity || '',
     category: row.category || '',
-    // Same-origin proxy (api/img) — browsers can't hotlink Bandai's CDN directly.
-    imageUrl: eid ? `/api/img?card=${encodeURIComponent(eid)}` : '',
+    // Bandai art goes through the same-origin proxy (can't hotlink their CDN);
+    // externally-sourced cards (e.g. tcgplayer) use their stored image_url directly.
+    imageUrl: (row.source && row.source !== 'bandai-official' && row.image_url)
+      ? row.image_url
+      : (eid ? `/api/img?card=${encodeURIComponent(eid)}` : ''),
     tcgplayerUrl: '',
     // Pricing deferred — no source yet. Kept as 0 so price reads stay graceful.
     tcg_id: 0,
@@ -169,8 +172,8 @@ const fetchAllCards = async () => {
   for (;;) {
     const { data, error } = await catalogClient
       .from('cards')
-      .select('id,card_code,variant_key,name,rarity,category,image_url,sets!inner(set_code,name,language)')
-      .eq('source', 'bandai-official')
+      .select('id,card_code,variant_key,name,rarity,category,image_url,source,sets!inner(set_code,name,language)')
+      .in('source', ['bandai-official', 'tcgplayer'])
       .eq('sets.language', LANGUAGE)
       .order('card_code', { ascending: true })
       .range(from, from + PAGE - 1);
