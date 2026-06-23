@@ -911,15 +911,15 @@ export default function App() {
             />
 
             {/* Segmented control to switch sub-tab, sitting below the tables. */}
-            <div style={{ display: 'inline-flex', background: 'rgba(255,255,255,0.05)', borderRadius: 10, padding: 4, gap: 4, margin: '4px 0 16px' }}>
+            <div style={{ display: 'inline-flex', background: '#000', border: '1px solid rgba(255,255,255,0.18)', borderRadius: 10, padding: 4, gap: 4, margin: '4px 0 16px' }}>
               {[['holdings', 'Collection'], ['sold', 'Sold'], ['transactions', 'Transactions']].map(([k, label]) => (
                 <button
                   key={k}
                   onClick={() => setCollectionTab(k)}
                   style={{
                     padding: '8px 18px', borderRadius: 7, border: 'none', cursor: 'pointer', fontSize: 14, fontWeight: 600,
-                    background: collectionTab === k ? 'rgba(255,255,255,0.16)' : 'transparent',
-                    color: collectionTab === k ? '#fff' : 'rgba(255,255,255,0.55)',
+                    color: '#fff',
+                    background: collectionTab === k ? 'rgba(255,255,255,0.22)' : 'transparent',
                   }}
                 >
                   {label}
@@ -4217,27 +4217,29 @@ function TransactionRow({ tx, collection, catalogIndex, onEdit, onDelete }) {
   return (
     <div className={`op-tx-row ${meta.cls}`}>
       <div className="op-tx-type">{meta.label}</div>
-      {card && <span style={{ flexShrink: 0 }}><CardThumb card={card} size={34} /></span>}
-      <div className="op-tx-main">
-        <div className="op-tx-card">
-          {display}
-          {!fullyAttributed && (
-            <span
-              title={`Contributions ($${attributed.toFixed(2)}) don't cover the $${amount.toFixed(2)} amount — $${(amount - attributed).toFixed(2)} unattributed`}
-              style={{ display: 'inline-flex', alignItems: 'center', gap: 3, marginLeft: 8, padding: '1px 6px', borderRadius: 5, background: 'rgba(217,131,36,0.18)', color: '#d98324', fontSize: 11, fontWeight: 600, verticalAlign: 'middle' }}
-            >
-              <AlertTriangle size={11} /> unattributed
-            </span>
-          )}
+      <div className="op-tx-main" style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+        {card && <span style={{ flexShrink: 0 }}><CardThumb card={card} size={38} /></span>}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 3, minWidth: 0 }}>
+          <div className="op-tx-card">
+            {display}
+            {!fullyAttributed && (
+              <span
+                title={`Contributions ($${attributed.toFixed(2)}) don't cover the $${amount.toFixed(2)} amount — $${(amount - attributed).toFixed(2)} unattributed`}
+                style={{ display: 'inline-flex', alignItems: 'center', gap: 3, marginLeft: 8, padding: '1px 6px', borderRadius: 5, background: 'rgba(217,131,36,0.18)', color: '#d98324', fontSize: 11, fontWeight: 600, verticalAlign: 'middle' }}
+              >
+                <AlertTriangle size={11} /> unattributed
+              </span>
+            )}
+          </div>
+          <div className="op-tx-meta">
+            {collection?.name || '—'}
+            {tx.occurred_at && <> · {tx.occurred_at}</>}
+            {tx.contributions && tx.contributions.length > 0 && (
+              <> · {tx.contributions.map(c => `${c.name} ${Number(c.amount) >= 0 ? '+' : '−'}$${Math.abs(Number(c.amount)).toFixed(2)}`).join(', ')}</>
+            )}
+          </div>
+          {tx.notes && <div className="op-tx-notes">{tx.notes}</div>}
         </div>
-        <div className="op-tx-meta">
-          {collection?.name || '—'}
-          {tx.occurred_at && <> · {tx.occurred_at}</>}
-          {tx.contributions && tx.contributions.length > 0 && (
-            <> · {tx.contributions.map(c => `${c.name} ${Number(c.amount) >= 0 ? '+' : '−'}$${Math.abs(Number(c.amount)).toFixed(2)}`).join(', ')}</>
-          )}
-        </div>
-        {tx.notes && <div className="op-tx-notes">{tx.notes}</div>}
       </div>
       <div className={`op-tx-amount ${meta.tone}`}>
         {meta.sign}${amount.toFixed(2)}
