@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useRef, useCallback, useReducer } from 'react';
 import { Search, Plus, X, TrendingUp, TrendingDown, Folder, Trash2, DollarSign, Anchor, ChevronRight, Package, BarChart3, RefreshCw, Cloud, HardDrive, ImageOff, Award, Loader2, Pencil, Eye, EyeOff, Receipt, ExternalLink, Archive } from 'lucide-react';
 import { store, MODE, VAULT_LABEL, getLastStoreError } from './storage.js';
-import { loadCatalog, groupBySet, compareSets, compareCards, augmentWithErrata, hasPreErrata, togglePreErrata } from './catalog.js';
+import { loadCatalog, groupBySet, compareSets, compareCards, augmentWithErrata, hasPreErrata, togglePreErrata, searchAlternateSource, deriveVariantKey, addExternalCard } from './catalog.js';
 import { hasPsaToken, fetchCert, fetchAuctionPrices, findCandidateCards } from './psa.js';
 import { runCanonicalMigration, runPcCleanup, runTcgplayerMigration, runClearLegacyResolutions } from './migrate.js';
 import {
@@ -197,6 +197,7 @@ export default function App() {
   const [editingEntry, setEditingEntry] = useState(null);
   const [sellingEntry, setSellingEntry] = useState(null);
   const [addByCertOpen, setAddByCertOpen] = useState(false);
+  const [addExternalOpen, setAddExternalOpen] = useState(false);
   const [expenseForEntry, setExpenseForEntry] = useState(null); // entry object
 
   // Load card catalog
@@ -788,6 +789,7 @@ export default function App() {
             watchlist={watchlist}
             variantRev={variantRev}
             onAddCard={setAddingCard}
+            onAddExternal={() => setAddExternalOpen(true)}
             onCardClick={setDetailCard}
             onToggleWatch={async (card) => {
               const cid = card.canonicalId || card.id;
@@ -875,6 +877,17 @@ export default function App() {
           onSave={async (entry) => {
             await addEntry(entry);
             setAddByCertOpen(false);
+          }}
+        />
+      )}
+
+      {addExternalOpen && (
+        <AddExternalCardModal
+          onClose={() => setAddExternalOpen(false)}
+          onAdded={async () => {
+            // A new printing landed in the catalog — drop the cached catalog and refetch.
+            try { const cards = await loadCatalog({ force: true }); setCatalog(cards); }
+            catch (e) { console.warn('catalog refresh after external add failed', e); }
           }}
         />
       )}
@@ -1403,6 +1416,117 @@ function CollectionView({ collection, entries, transactions = [], catalogIndex, 
 //
 // Entries without a `contributions` array fall back to a single contribution
 // of `purchase_price` attributed to `owner_name` (or "Unattributed").
+// Add-from-alternate-source modal. The official Bandai cardlist is missing some
+// printings (tournament / promo cards). This looks the number up on TCGplayer
+// (via /api/tcgcsv), lets the user pick the exact printing, and inserts it into
+// the catalog as a `source='tcgplayer'` card so it's separable for later cleanup.
+function AddExternalCardModal({ onClose, onAdded }) {
+  const [number, setNumber] = useState('');
+  const [results, setResults] = useState(null); // null = not searched yet, [] = no hits
+  const [selected, setSelected] = useState(null);
+  const [variantKey, setVariantKey] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  const btn = { padding: '8px 14px', borderRadius: 8, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.08)', color: 'inherit', cursor: 'pointer', fontSize: 13 };
+  const input = { width: '100%', padding: '8px 10px', borderRadius: 8, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(0,0,0,0.25)', color: 'inherit', fontSize: 14, boxSizing: 'border-box' };
+
+  const doSearch = async () => {
+    setError(''); setSelected(null); setResults(null);
+    if (!number.trim()) return;
+    setBusy(true);
+    try {
+      const prods = await searchAlternateSource(number);
+      setResults(prods);
+    } catch (e) { setError(e.message || String(e)); }
+    setBusy(false);
+  };
+
+  const pick = (p) => {
+    setSelected(p);
+    setVariantKey(deriveVariantKey(p.name));
+    setError('');
+  };
+
+  const add = async () => {
+    if (!selected) return;
+    setBusy(true); setError('');
+    try {
+      await addExternalCard({
+        cardCode: selected.number,
+        variantKey,
+        name: selected.clean_name || selected.name,
+        rarity: selected.rarity,
+        imageUrl: selected.image_url,
+        externalId: selected.tcg_id,
+      });
+      await onAdded?.();
+      onClose();
+    } catch (e) { setError(e.message || String(e)); setBusy(false); }
+  };
+
+  return (
+    <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'flex-start', justifyContent: 'center', padding: '8vh 16px', zIndex: 1000 }}>
+      <div onClick={e => e.stopPropagation()} style={{ width: '100%', maxWidth: 560, background: '#1c1a17', border: '1px solid rgba(255,255,255,0.12)', borderRadius: 12, padding: 16, maxHeight: '84vh', overflowY: 'auto', boxShadow: '0 20px 60px rgba(0,0,0,0.5)', display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <h2 style={{ margin: 0, fontSize: 18 }}>Add a missing card</h2>
+          <button type="button" onClick={onClose} style={{ ...btn, padding: 6, background: 'transparent', border: 'none' }}><X size={18} /></button>
+        </div>
+        <p style={{ fontSize: 13, opacity: 0.7, margin: 0 }}>
+          For printings the official cardlist is missing (tournament / promo cards). Look it up on TCGplayer by card number, pick the exact printing, and it's added to the catalog.
+        </p>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <input
+            autoFocus
+            placeholder="Card number, e.g. OP09-004 or P-041"
+            value={number}
+            onChange={e => setNumber(e.target.value)}
+            onKeyDown={e => e.key === 'Enter' && doSearch()}
+            style={{ ...input, flex: 1 }}
+          />
+          <button type="button" onClick={doSearch} disabled={busy} style={btn}>{busy && !selected ? '…' : 'Search'}</button>
+        </div>
+
+        {error && <div style={{ color: '#ff8c7a', fontSize: 13 }}>{error}</div>}
+        {results && results.length === 0 && <div style={{ opacity: 0.6, fontSize: 13 }}>No TCGplayer products found for that number.</div>}
+
+        {results && results.length > 0 && (
+          <div style={{ maxHeight: 320, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {results.map(p => (
+              <div
+                key={p.tcg_id}
+                onClick={() => pick(p)}
+                style={{ display: 'flex', gap: 10, alignItems: 'center', padding: 8, borderRadius: 8, cursor: 'pointer',
+                  border: selected?.tcg_id === p.tcg_id ? '1px solid #6aa9ff' : '1px solid transparent',
+                  background: selected?.tcg_id === p.tcg_id ? 'rgba(106,169,255,0.12)' : 'rgba(255,255,255,0.03)' }}
+              >
+                {p.image_url
+                  ? <img src={p.image_url} alt="" style={{ width: 38, height: 53, objectFit: 'cover', borderRadius: 4, flexShrink: 0 }} />
+                  : <div style={{ width: 38, height: 53, flexShrink: 0, borderRadius: 4, background: 'rgba(255,255,255,0.05)' }} />}
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 13 }}>{p.name}</div>
+                  <div style={{ fontSize: 11, opacity: 0.6 }}>{p.number} · {p.rarity || '—'} · pid {p.tcg_id}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {selected && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: 12 }}>
+            <div style={{ fontSize: 13 }}>Adding <strong>{selected.number}</strong> — {selected.clean_name || selected.name}</div>
+            <label style={{ fontSize: 12, opacity: 0.7 }}>Variant label (distinguishes it from other printings of this number)</label>
+            <input value={variantKey} onChange={e => setVariantKey(e.target.value)} style={input} />
+            <button type="button" onClick={add} disabled={busy || !variantKey.trim()} style={{ ...btn, background: '#2f6b3d', borderColor: '#2f6b3d' }}>
+              {busy ? 'Adding…' : 'Add to catalog'}
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // Sold / history view — cards retained after sale (date_sold set), with realized P&L.
 function SoldView({ entries = [], catalogIndex, variantRev = 0 }) {
   const money = (n) => `$${(Number(n) || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -1907,7 +2031,7 @@ function CardThumb({ card, size = 60 }) {
 }
 
 // ============================================================================
-function SearchView({ catalog, watchlist = [], variantRev = 0, onAddCard, onCardClick, onToggleWatch = () => {} }) {
+function SearchView({ catalog, watchlist = [], variantRev = 0, onAddCard, onAddExternal = () => {}, onCardClick, onToggleWatch = () => {} }) {
   const watchedIds = useMemo(() => new Set(watchlist.map(w => w.card_id)), [watchlist]);
   const [q, setQ] = useStoredState('optcg:search:q', '');
   const [setFilter, setSetFilter] = useStoredState('optcg:search:setFilter', 'all');
@@ -1985,7 +2109,19 @@ function SearchView({ catalog, watchlist = [], variantRev = 0, onAddCard, onCard
         <div>
           <div className="op-eyebrow">Catalog</div>
           <h1 className="op-page-title">Card Search</h1>
-          <div className="op-page-sub">{catalog.length.toLocaleString()} cards indexed · live prices via TCGPlayer (TCGCSV)</div>
+          <div className="op-page-sub">{catalog.length.toLocaleString()} cards indexed</div>
+        </div>
+        <div className="op-page-head-actions">
+          {/* Escape hatch for printings the official Bandai cardlist is missing
+              (tournament / promo cards) — pull them from TCGplayer instead. */}
+          <button
+            type="button"
+            onClick={onAddExternal}
+            title="Add a printing the official cardlist is missing (from TCGplayer)"
+            style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '8px 14px', borderRadius: 8, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.06)', color: 'inherit', cursor: 'pointer', fontSize: 13 }}
+          >
+            <Plus size={15} /> Add missing card
+          </button>
         </div>
       </div>
 

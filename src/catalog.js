@@ -237,6 +237,59 @@ export const togglePreErrata = (cardId) => {
   return set.has(cardId);
 };
 
+// ---------------------------------------------------------------------------
+// Add-from-alternate-source: when the official Bandai cardlist is missing a
+// printing (tournament/promo cards, etc.), look it up on TCGplayer (via the
+// TCGCSV proxy) and add it to the catalog as source='tcgplayer'. RLS lets the
+// anon key INSERT only source='tcgplayer' rows; official cards stay protected.
+// ---------------------------------------------------------------------------
+
+// Search TCGplayer for every printing of a card number (e.g. "OP09-004").
+export const searchAlternateSource = async (number) => {
+  const n = String(number || '').trim();
+  if (!n) return [];
+  const res = await fetch(`/api/tcgcsv?number=${encodeURIComponent(n)}`);
+  if (!res.ok) throw new Error(`TCGplayer lookup failed (${res.status})`);
+  const body = await res.json();
+  return Array.isArray(body?.products) ? body.products : [];
+};
+
+// Derive a stable, descriptive variant_key slug from a TCGplayer product name,
+// e.g. "Killer (CS 2023 Top Players Pack) [Winner]" -> "cs-2023-top-players-pack-winner".
+export const deriveVariantKey = (productName) => {
+  const parts = [...String(productName || '').matchAll(/[([]([^)\]]+)[)\]]/g)].map(m => m[1]);
+  const slug = (parts.join(' ') || 'promo').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 32);
+  return slug || 'promo';
+};
+
+// Insert a missing printing. Anchors the home set from the card's base printing.
+// Returns the raw inserted row; caller should reload the catalog to pick it up.
+export const addExternalCard = async ({ cardCode, variantKey, name, rarity, imageUrl, externalId, category }) => {
+  const code = String(cardCode || '').trim();
+  const variant = String(variantKey || '').trim().toLowerCase();
+  if (!code) throw new Error('A card number is required.');
+  if (!variant) throw new Error('A variant label is required.');
+  const { data: base, error: bErr } = await catalogClient.from('cards')
+    .select('set_id, category').eq('card_code', code).eq('variant_key', 'base').limit(1).maybeSingle();
+  if (bErr) throw new Error(bErr.message);
+  if (!base) throw new Error(`No base printing of ${code} in the catalog to anchor its set.`);
+  const row = {
+    set_id: base.set_id,
+    card_code: code,
+    variant_key: variant,
+    name: name || '',
+    rarity: rarity || null,
+    category: category || base.category || null,
+    image_url: imageUrl || null,
+    external_id: externalId != null ? String(externalId) : null,
+    source: 'tcgplayer',
+  };
+  const { data, error } = await catalogClient.from('cards').insert(row).select().single();
+  if (error) throw new Error(error.message);
+  try { localStorage.removeItem(CACHE_KEY); } catch {} // bust cache so it shows on reload
+  return data;
+};
+
 export const augmentWithErrata = (catalog) => {
   const set = readErrataSet();
   if (set.size === 0) return catalog;
