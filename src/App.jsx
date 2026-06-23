@@ -109,6 +109,16 @@ const effectiveRawPrice = (card) => {
   return getMarketPriceForCard(card) ?? 0;
 };
 
+// Market value of an OWNED card. No live price source exists yet (TCGCSV pricing
+// was dropped; a sales-derived source is planned), so for now a card is worth
+// what we paid for it — its cost basis. Graded cards keep a manually-entered
+// graded_price when present, since that's already a real market estimate.
+const entryMarketValue = (e) => {
+  if (!e) return 0;
+  if (e.grading_company && Number(e.graded_price) > 0) return Number(e.graded_price);
+  return Number(e.purchase_price) || 0;
+};
+
 // useEnhancedImage: returns [ref, url]. Attach ref to the rendered element
 // so we only kick off a price fetch when the card scrolls into the viewport
 // (with a 200px margin so we pre-fetch just before it appears). TCGPlayer-
@@ -1332,11 +1342,9 @@ function CollectionView({ collection, entries, transactions = [], catalogIndex, 
   // hasn't entered a price for yet contribute 0 (and the UI shows "—" so
   // it's obviously pending). Raw entries fall through to the TCGCSV raw
   // market price.
-  const marketValueOf = useCallback((e) => {
-    if (e.grading_company) return Number(e.graded_price) || 0;
-    const card = catalogIndex.get(e.card_id);
-    return card ? effectiveRawPrice(card) : 0;
-  }, [catalogIndex]);
+  // Until a price source exists, a card is worth what we paid (cost basis);
+  // graded cards keep a manually-entered graded_price when present.
+  const marketValueOf = useCallback((e) => entryMarketValue(e), []);
 
   const searchedEntries = useMemo(() => {
     const needle = colQ.trim().toLowerCase();
@@ -1387,16 +1395,8 @@ function CollectionView({ collection, entries, transactions = [], catalogIndex, 
     for (const e of entries) {
       totalPaid += Number(e.purchase_price) || 0;
       totalExpenses += expensesByEntry.get(e.id) || 0;
-      if (e.grading_company) {
-        // Graded: only the manual graded_price counts; missing → 0 (don't
-        // fall back to raw, since slabbed value isn't raw value).
-        const gp = Number(e.graded_price) || 0;
-        totalMarket += gp;
-        gradedCount += 1;
-      } else {
-        const card = catalogIndex.get(e.card_id);
-        if (card) totalMarket += effectiveRawPrice(card);
-      }
+      totalMarket += entryMarketValue(e); // = cost basis until a price source exists
+      if (e.grading_company) gradedCount += 1;
     }
     return { totalPaid, totalExpenses, totalMarket, count: entries.length, gradedCount };
     // variantRev forces recompute when PC variant snapshots land
@@ -1536,9 +1536,8 @@ function CollectionView({ collection, entries, transactions = [], catalogIndex, 
               // fallback. A graded entry without a price is "pending" — UI
               // renders the market column as "—" so the user knows to fill it in.
               const isGradedEntry = Boolean(entry.grading_company);
-              const gradedPrice = Number(entry.graded_price) || 0;
-              const marketKnown = isGradedEntry ? gradedPrice > 0 : true;
-              const marketValue = isGradedEntry ? gradedPrice : effectiveRawPrice(card);
+              const marketKnown = true; // market = cost basis (or graded price) until a price source exists
+              const marketValue = entryMarketValue(entry);
               const expenses = expensesByEntry.get(entry.id) || 0;
               const costBasis = (Number(entry.purchase_price) || 0) + expenses;
               const delta = marketKnown ? marketValue - costBasis : 0;
@@ -1730,10 +1729,7 @@ function CollectionSummary({ transactions = [], activeEntries = [], collections 
   }, [scopedTxs]);
   const equityNav = useMemo(() => {
     let nav = 0;
-    for (const e of activeEntries) {
-      if (e.grading_company) nav += Number(e.graded_price) || 0;
-      else { const c = catalogIndex.get(e.card_id); if (c) nav += effectiveRawPrice(c); }
-    }
+    for (const e of activeEntries) nav += entryMarketValue(e); // = cost basis until pricing exists
     return nav;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeEntries, catalogIndex, variantRev]);
@@ -1961,11 +1957,9 @@ function EquityPanel({ entries, transactions = [], catalogIndex, totalMarket, co
     let totalUnits = 0;
     let nav = 0;
 
-    const currentNavOfCard = (cardId) => {
-      const c = catalogIndex.get(cardId);
-      return c ? effectiveRawPrice(c) : 0;
-    };
-
+    // No live price source yet — a card is worth what we paid, so NAV tracks net
+    // cash flow only (no unrealized-gain bumps on buys/sells). When a real price
+    // source lands, reintroduce a per-card market adjustment here.
     for (const ev of events) {
       const t = ev.tx;
       const unitPrice = totalUnits > 0 && nav > 0 ? nav / totalUnits : 1;
@@ -1976,27 +1970,6 @@ function EquityPanel({ entries, transactions = [], catalogIndex, totalMarket, co
         totalUnits += issued;
         if (c.amount > 0) grossIn.set(c.name, (grossIn.get(c.name) || 0) + c.amount);
         nav += c.amount; // signed cash flow into the pool
-      }
-      // For buys, bump NAV to reflect today's market value of the acquired
-      // card — positive when the card's up vs. cost, negative when it's down.
-      // Net effect: NAV change on a buy = card's current market (cash + delta).
-      // This is what lets new contributions buy in at a depressed unit price
-      // when the pool is underwater, and a premium when the pool is up.
-      if (ev.kind === 'buy') {
-        const market = currentNavOfCard(t.card_id);
-        const paid = Number(t.amount) || 0;
-        const bonus = market - paid;
-        if (bonus !== 0) nav += bonus;
-      }
-      // For sells, the cash-out leg only reduced NAV by proceeds. The card
-      // itself is also leaving the pool, so subtract its current market on
-      // top — total NAV change ends up at -market, matching reality even if
-      // proceeds came in below (or above) today's market.
-      if (ev.kind === 'sell') {
-        const market = currentNavOfCard(t.card_id);
-        const proceeds = Number(t.amount) || 0;
-        const adjustment = -(market - proceeds);
-        if (adjustment !== 0) nav += adjustment;
       }
     }
 
