@@ -216,6 +216,8 @@ export default function App() {
   const [logSaleFor, setLogSaleFor] = useState(null);
 
   const [view, setView] = useState('collection');
+  // Sub-tab within the consolidated Collection tab: holdings / sold / transactions.
+  const [collectionTab, setCollectionTab] = useState('holdings');
   const [activeCollectionId, setActiveCollectionId] = useState(null);
   const [detailCard, setDetailCard] = useState(null);
   const [addingCard, setAddingCard] = useState(null);
@@ -893,31 +895,64 @@ export default function App() {
 
       <main className="op-main">
         {view === 'collection' && (
-          <CollectionView
-            collection={activeCollection}
-            entries={activeEntries}
-            transactions={transactions}
-            catalogIndex={catalogIndex}
-            variantRev={variantRev}
-            onSearchClick={() => setView('search')}
-            onAddByCertClick={hasPsaToken() ? () => setAddByCertOpen(true) : null}
-            onRefreshGradedPrices={refreshGradedPrices}
-            gradedRefresh={gradedRefresh}
-            onCardClick={(card) => setDetailCard(card)}
-            onRemoveEntry={removeEntry}
-            onSellEntry={(entry) => setSellingEntry(entry)}
-            onExpenseEntry={(entry) => setExpenseForEntry(entry)}
-            onUpdateMembers={isAllMode ? null : (members) => updateMembers(activeCollection.id, members)}
-            onEditEntry={(entry) => {
-              const card = catalogIndex.get(entry.card_id);
-              if (!card) return;
-              setAddingCard(card);
-              setEditingEntry(entry);
-            }}
-          />
-        )}
-        {view === 'sold' && (
-          <SoldView entries={soldEntries} catalogIndex={catalogIndex} variantRev={variantRev} />
+          <>
+            <div className="op-subtabs" style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap' }}>
+              {[['holdings', 'Collection'], ['sold', 'Sold'], ['transactions', 'Transactions']].map(([k, label]) => (
+                <button key={k} className={`op-nav-btn ${collectionTab === k ? 'is-active' : ''}`} onClick={() => setCollectionTab(k)}>
+                  {label}
+                </button>
+              ))}
+            </div>
+
+            {collectionTab === 'holdings' && (
+              <CollectionView
+                collection={activeCollection}
+                entries={activeEntries}
+                transactions={transactions}
+                catalogIndex={catalogIndex}
+                variantRev={variantRev}
+                onSearchClick={() => setView('search')}
+                onAddByCertClick={hasPsaToken() ? () => setAddByCertOpen(true) : null}
+                onRefreshGradedPrices={refreshGradedPrices}
+                gradedRefresh={gradedRefresh}
+                onCardClick={(card) => setDetailCard(card)}
+                onRemoveEntry={removeEntry}
+                onSellEntry={(entry) => setSellingEntry(entry)}
+                onExpenseEntry={(entry) => setExpenseForEntry(entry)}
+                onUpdateMembers={isAllMode ? null : (members) => updateMembers(activeCollection.id, members)}
+                onEditEntry={(entry) => {
+                  const card = catalogIndex.get(entry.card_id);
+                  if (!card) return;
+                  setAddingCard(card);
+                  setEditingEntry(entry);
+                }}
+              />
+            )}
+
+            {collectionTab === 'sold' && (
+              <SoldView entries={soldEntries} catalogIndex={catalogIndex} variantRev={variantRev} />
+            )}
+
+            {collectionTab === 'transactions' && (
+              <TransactionsView
+                transactions={transactions}
+                collections={collections}
+                entries={entries}
+                catalog={augmentedCatalog}
+                catalogIndex={catalogIndex}
+                variantRev={variantRev}
+                activeCollectionId={activeCollectionId}
+                onLogTransaction={async (tx) => {
+                  const created = await store.insert('transactions', { id: uid(), ...tx, created_at: new Date().toISOString() });
+                  if (created) setTransactions(prev => [...prev, created]);
+                  else alert("Couldn't save the transaction. Check the console for the Supabase error.");
+                }}
+                onLogTrade={logTrade}
+                onUpdateTransaction={updateTransaction}
+                onRemoveTransaction={removeTransaction}
+              />
+            )}
+          </>
         )}
         {view === 'search' && (
           <SearchView
@@ -952,25 +987,6 @@ export default function App() {
             onBrowseCatalog={() => setView('search')}
             onRemove={removeFromWatchlist}
             onUpdate={updateWatchlistItem}
-          />
-        )}
-        {view === 'transactions' && (
-          <TransactionsView
-            transactions={transactions}
-            collections={collections}
-            entries={entries}
-            catalog={augmentedCatalog}
-            catalogIndex={catalogIndex}
-            variantRev={variantRev}
-            activeCollectionId={activeCollectionId}
-            onLogTransaction={async (tx) => {
-              const created = await store.insert('transactions', { id: uid(), ...tx, created_at: new Date().toISOString() });
-              if (created) setTransactions(prev => [...prev, created]);
-              else alert("Couldn't save the transaction. Check the console for the Supabase error.");
-            }}
-            onLogTrade={logTrade}
-            onUpdateTransaction={updateTransaction}
-            onRemoveTransaction={removeTransaction}
           />
         )}
         {view === 'sales' && (
@@ -1177,12 +1193,6 @@ function Header({ view, setView, collections, activeCollectionId, setActiveColle
       <nav className="op-nav">
         <button className={`op-nav-btn ${view === 'collection' ? 'is-active' : ''}`} onClick={() => setView('collection')}>
           <Folder size={15} /> Collection
-        </button>
-        <button className={`op-nav-btn ${view === 'sold' ? 'is-active' : ''}`} onClick={() => setView('sold')}>
-          <Archive size={15} /> Sold
-        </button>
-        <button className={`op-nav-btn ${view === 'transactions' ? 'is-active' : ''}`} onClick={() => setView('transactions')}>
-          <BarChart3 size={15} /> Transactions
         </button>
         <button className={`op-nav-btn ${view === 'search' ? 'is-active' : ''}`} onClick={() => setView('search')}>
           <Search size={15} /> Search
@@ -1672,12 +1682,38 @@ function SoldView({ entries = [], catalogIndex, variantRev = 0 }) {
   const signed = (n) => `${n >= 0 ? '+' : '-'}${money(Math.abs(n))}`;
   const plColor = (n) => (n > 0 ? '#3d7a4a' : n < 0 ? '#c8442a' : '#888');
 
-  const rows = useMemo(() => entries.map(e => {
-    const card = catalogIndex.get(e.card_id);
-    const cost = Number(e.purchase_price) || 0;
-    const sold = Number(e.sold_price) || 0;
-    return { e, card, cost, sold, pl: sold - cost };
-  }).sort((a, b) => (b.e.date_sold || '').localeCompare(a.e.date_sold || '')), [entries, catalogIndex, variantRev]);
+  const [q, setQ] = useState('');
+  const [contributor, setContributor] = useState('all');
+
+  // Contributors come from each sold card's (buy-tx) contributions.
+  const contributorOptions = useMemo(() => {
+    const s = new Set();
+    for (const e of entries) for (const c of (e.contributions || [])) if (c.name) s.add(c.name);
+    return [...s].sort();
+  }, [entries]);
+
+  const rows = useMemo(() => {
+    const needle = q.trim().toLowerCase();
+    return entries
+      .filter(e => {
+        if (contributor !== 'all' && !(e.contributions || []).some(c => c.name === contributor)) return false;
+        if (!needle) return true;
+        const card = catalogIndex.get(e.card_id);
+        const hay = [
+          card?.name, card?.fullName, card?.displayId, card?.variantKey, card?.setName,
+          e.condition, e.grading_company, e.acquisition_notes,
+          ...(e.contributions || []).map(c => c.name),
+        ].filter(Boolean).join(' ').toLowerCase();
+        return hay.includes(needle);
+      })
+      .map(e => {
+        const card = catalogIndex.get(e.card_id);
+        const cost = Number(e.purchase_price) || 0;
+        const sold = Number(e.sold_price) || 0;
+        return { e, card, cost, sold, pl: sold - cost };
+      })
+      .sort((a, b) => (b.e.date_sold || '').localeCompare(a.e.date_sold || ''));
+  }, [entries, catalogIndex, variantRev, q, contributor]);
 
   const totals = rows.reduce((t, r) => ({ cost: t.cost + r.cost, sold: t.sold + r.sold, pl: t.pl + r.pl }), { cost: 0, sold: 0, pl: 0 });
 
@@ -1693,8 +1729,21 @@ function SoldView({ entries = [], catalogIndex, variantRev = 0 }) {
           </div>
         </div>
       </div>
-      {rows.length === 0 ? (
+
+      <div className="op-search-bar" style={{ marginBottom: 12 }}>
+        <Search size={18} className="op-search-icon" />
+        <input className="op-search-input" placeholder="Search sold cards…" value={q} onChange={(e) => setQ(e.target.value)} />
+        {q && <button className="op-search-clear" onClick={() => setQ('')}><X size={15} /></button>}
+        <select value={contributor} onChange={(e) => setContributor(e.target.value)} style={{ marginLeft: 8 }}>
+          <option value="all">All contributors</option>
+          {contributorOptions.map(n => <option key={n} value={n}>{n}</option>)}
+        </select>
+      </div>
+
+      {entries.length === 0 ? (
         <div style={{ padding: '2rem', opacity: 0.6 }}>No sold cards yet.</div>
+      ) : rows.length === 0 ? (
+        <div style={{ padding: '2rem', opacity: 0.6 }}>No sold cards match your search.</div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           {rows.map(({ e, card, cost, sold, pl }) => (
@@ -3829,6 +3878,8 @@ function BulkGradingModal({ entries, catalogIndex, members = [], collectionId, o
 // ============================================================================
 function TransactionsView({ transactions, collections, entries = [], catalog = [], catalogIndex = new Map(), variantRev = 0, activeCollectionId, onLogTransaction = () => {}, onLogTrade = () => {}, onUpdateTransaction = () => {}, onRemoveTransaction = () => {} }) {
   const [editingTx, setEditingTx] = useState(null);
+  const [search, setSearch] = useState('');
+  const [contributorFilter, setContributorFilter] = useState('all');
   const [typeFilter, setTypeFilter] = useState('all'); // 'all' | 'buy' | 'sell' | 'transfer' | 'expense'
   // Default the transactions view to the active collection — most users want
   // their current pool, not a global feed. The dropdown still has "All
@@ -3873,15 +3924,33 @@ function TransactionsView({ transactions, collections, entries = [], catalog = [
   }, [equityEntries, catalogIndex, variantRev]);
 
   const filtered = useMemo(() => {
+    const needle = search.trim().toLowerCase();
     return transactions
       .filter(t => typeFilter === 'all' || t.type === typeFilter)
       .filter(t => collectionFilter === 'all' || t.collection_id === collectionFilter)
+      .filter(t => contributorFilter === 'all' || (Array.isArray(t.contributions) && t.contributions.some(c => c.name === contributorFilter)))
+      .filter(t => {
+        if (!needle) return true;
+        const card = t.card_id ? catalogIndex.get(t.card_id) : null;
+        const hay = [
+          t.card_display_name, t.notes, t.type,
+          card?.name, card?.fullName, card?.displayId, card?.variantKey,
+          ...((t.contributions || []).map(c => c.name)),
+        ].filter(Boolean).join(' ').toLowerCase();
+        return hay.includes(needle);
+      })
       .sort((a, b) => {
         const da = a.occurred_at || a.created_at || '';
         const db = b.occurred_at || b.created_at || '';
         return db.localeCompare(da); // newest first
       });
-  }, [transactions, typeFilter, collectionFilter]);
+  }, [transactions, typeFilter, collectionFilter, contributorFilter, search, catalogIndex]);
+
+  const contributorOptions = useMemo(() => {
+    const s = new Set();
+    for (const t of transactions) for (const c of (t.contributions || [])) if (c.name) s.add(c.name);
+    return [...s].sort();
+  }, [transactions]);
 
   const totals = useMemo(() => {
     let bought = 0, sold = 0, expenses = 0, payouts = 0;
@@ -3942,6 +4011,12 @@ function TransactionsView({ transactions, collections, entries = [], catalog = [
         />
       )}
 
+      <div className="op-search-bar" style={{ marginBottom: 12 }}>
+        <Search size={18} className="op-search-icon" />
+        <input className="op-search-input" placeholder="Search transactions…" value={search} onChange={(e) => setSearch(e.target.value)} />
+        {search && <button className="op-search-clear" onClick={() => setSearch('')}><X size={15} /></button>}
+      </div>
+
       <div className="op-filters">
         <FilterGroup label="Type" value={typeFilter} onChange={setTypeFilter} options={[
           { v: 'all', l: 'All' },
@@ -3954,6 +4029,10 @@ function TransactionsView({ transactions, collections, entries = [], catalog = [
         <FilterGroup label="Collection" value={collectionFilter} onChange={setCollectionFilter} mode="select" options={[
           { v: 'all', l: 'All collections' },
           ...collections.map(c => ({ v: c.id, l: c.name })),
+        ]} />
+        <FilterGroup label="Contributor" value={contributorFilter} onChange={setContributorFilter} mode="select" options={[
+          { v: 'all', l: 'All contributors' },
+          ...contributorOptions.map(n => ({ v: n, l: n })),
         ]} />
 
         <div className="op-filter-group">
