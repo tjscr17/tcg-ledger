@@ -3018,10 +3018,15 @@ function TradeModal({ members = [], collection, entries = [], catalog = [], cata
   const pickedOut = new Set(outgoing.map(o => o.entryId));
   const availableEntries = entries.filter(e => !pickedOut.has(e.id));
 
+  // Reference value for an owned card: its graded price when graded (the value
+  // that feeds NAV), else what was paid. Shown while selecting and used to seed
+  // the credit value. (Catalog market prices are 0 until pricing is re-sourced.)
+  const refPriceOf = (e) => (e?.grading_company && Number(e?.graded_price) > 0) ? Number(e.graded_price) : (Number(e?.purchase_price) || 0);
+
   const addOutgoing = (entryId) => {
     const e = entries.find(x => x.id === entryId);
     if (!e) return;
-    setOutgoing(prev => [...prev, { entryId, value: String(e.purchase_price ?? '') }]);
+    setOutgoing(prev => [...prev, { entryId, value: String(refPriceOf(e)) }]);
   };
   const updateOutgoing = (entryId, value) => setOutgoing(prev => prev.map(o => o.entryId === entryId ? { ...o, value } : o));
   const removeOutgoing = (entryId) => setOutgoing(prev => prev.filter(o => o.entryId !== entryId));
@@ -3108,9 +3113,10 @@ function TradeModal({ members = [], collection, entries = [], catalog = [], cata
                 <option value="">+ Add a card you're giving…</option>
                 {availableEntries.map(e => {
                   const c = catalogIndex.get(e.card_id);
+                  const isGraded = Boolean(e.grading_company);
                   return (
                     <option key={e.id} value={e.id}>
-                      {(c ? `${c.displayId || c.id} · ${c.name}` : e.card_id)}{e.grading_company ? ` (${e.grading_company} ${e.grade})` : ''}
+                      {(c ? `${c.displayId || c.id} · ${c.name}` : e.card_id)}{isGraded ? ` (${e.grading_company} ${e.grade})` : ''} — {isGraded && Number(e.graded_price) > 0 ? 'value' : 'paid'} ${refPriceOf(e).toFixed(2)}
                     </option>
                   );
                 })}
@@ -3120,9 +3126,13 @@ function TradeModal({ members = [], collection, entries = [], catalog = [], cata
           {outgoing.map(o => {
             const e = entries.find(x => x.id === o.entryId);
             const c = e ? catalogIndex.get(e.card_id) : null;
+            const isGraded = Boolean(e?.grading_company);
             return (
               <div key={o.entryId} className="op-form-row" style={{ alignItems: 'flex-end', gap: 8 }}>
-                <div style={{ flex: 1, fontSize: 13, paddingBottom: 8 }}>{c ? `${c.displayId || c.id} · ${c.name}` : (e?.card_id || o.entryId)}</div>
+                <div style={{ flex: 1, fontSize: 13, paddingBottom: 8 }}>
+                  {c ? `${c.displayId || c.id} · ${c.name}` : (e?.card_id || o.entryId)}
+                  {e && <span style={{ opacity: 0.55, marginLeft: 6 }}>· {isGraded && Number(e.graded_price) > 0 ? 'value' : 'paid'} ${refPriceOf(e).toFixed(2)}</span>}
+                </div>
                 <Field label="Credit value">
                   <input type="number" step="0.01" value={o.value} onChange={(ev) => updateOutgoing(o.entryId, ev.target.value)} placeholder="0.00" />
                 </Field>
