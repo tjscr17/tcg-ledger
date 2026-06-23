@@ -221,7 +221,7 @@ export default function App() {
 
   const [view, setView] = useState('collection');
   // Sub-tab within the consolidated Collection tab: holdings / sold / transactions.
-  const [collectionTab, setCollectionTab] = useState('holdings');
+  const [collectionTab, setCollectionTab] = useStoredState('optcg:collectionTab', 'holdings');
   const [activeCollectionId, setActiveCollectionId] = useState(null);
   const [detailCard, setDetailCard] = useState(null);
   const [addingCard, setAddingCard] = useState(null);
@@ -1764,7 +1764,7 @@ function SoldView({ entries = [], catalogIndex, variantRev = 0 }) {
   const signed = (n) => `${n >= 0 ? '+' : '-'}${money(Math.abs(n))}`;
   const plColor = (n) => (n > 0 ? '#3d7a4a' : n < 0 ? '#c8442a' : '#888');
 
-  const [q, setQ] = useState('');
+  const [q, setQ] = useStoredState('optcg:sold:q', '');
   const [contributor, setContributor] = useState('all');
 
   // Contributors come from each sold card's (buy-tx) contributions.
@@ -3960,18 +3960,11 @@ function BulkGradingModal({ entries, catalogIndex, members = [], collectionId, o
 // ============================================================================
 function TransactionsView({ transactions, collections, entries = [], catalog = [], catalogIndex = new Map(), variantRev = 0, activeCollectionId, onLogTransaction = () => {}, onLogTrade = () => {}, onUpdateTransaction = () => {}, onRemoveTransaction = () => {} }) {
   const [editingTx, setEditingTx] = useState(null);
-  const [search, setSearch] = useState('');
+  const [search, setSearch] = useStoredState('optcg:tx:q', '');
   const [contributorFilter, setContributorFilter] = useState('all');
   const [typeFilter, setTypeFilter] = useState('all'); // 'all' | 'buy' | 'sell' | 'transfer' | 'expense'
-  // Default the transactions view to the active collection — most users want
-  // their current pool, not a global feed. The dropdown still has "All
-  // collections" if you want to override. Re-mounting the view (navigating
-  // away and back) resets to the active collection again.
-  const [collectionFilter, setCollectionFilter] = useState(() => activeCollectionId || 'all');
-  // Follow active-collection changes from the header picker.
-  useEffect(() => {
-    if (activeCollectionId) setCollectionFilter(activeCollectionId);
-  }, [activeCollectionId]);
+  // Collection scope follows the header picker (no separate in-tab control).
+  const collectionFilter = activeCollectionId || 'all';
   const [modal, setModal] = useState(null); // 'transfer' | 'expense' | 'payout' | 'bulkgrade' | null
 
   const collectionsById = useMemo(() => {
@@ -4057,10 +4050,6 @@ function TransactionsView({ transactions, collections, entries = [], catalog = [
           { v: 'transfer', l: 'Transfers' },
           { v: 'expense', l: 'Expenses' },
           { v: 'payout', l: 'Payouts' },
-        ]} />
-        <FilterGroup label="Collection" value={collectionFilter} onChange={setCollectionFilter} mode="select" options={[
-          { v: 'all', l: 'All collections' },
-          ...collections.map(c => ({ v: c.id, l: c.name })),
         ]} />
         <FilterGroup label="Contributor" value={contributorFilter} onChange={setContributorFilter} mode="select" options={[
           { v: 'all', l: 'All contributors' },
