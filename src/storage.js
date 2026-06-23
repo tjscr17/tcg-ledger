@@ -252,7 +252,7 @@ const shared = {
 
     if (table === 'entries') {
       const { data: ccs, error } = await supa.from('collected_cards')
-        .select('*').eq('vault_key', VAULT_KEY).is('date_sold', null); // active holdings only
+        .select('*').eq('vault_key', VAULT_KEY); // active + sold; the app filters active vs sold
       if (error) { console.error(error); return []; }
       // contributions per card come from its BUY transaction
       const { data: buys } = await supa.from('transactions')

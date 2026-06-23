@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useRef, useCallback, useReducer } from 'react';
-import { Search, Plus, X, TrendingUp, TrendingDown, Folder, Trash2, DollarSign, Anchor, ChevronRight, Package, BarChart3, RefreshCw, Cloud, HardDrive, ImageOff, Award, Loader2, Pencil, Eye, EyeOff, Receipt, ExternalLink } from 'lucide-react';
+import { Search, Plus, X, TrendingUp, TrendingDown, Folder, Trash2, DollarSign, Anchor, ChevronRight, Package, BarChart3, RefreshCw, Cloud, HardDrive, ImageOff, Award, Loader2, Pencil, Eye, EyeOff, Receipt, ExternalLink, Archive } from 'lucide-react';
 import { store, MODE, VAULT_LABEL, getLastStoreError } from './storage.js';
 import { loadCatalog, groupBySet, compareSets, compareCards, augmentWithErrata, hasPreErrata, togglePreErrata } from './catalog.js';
 import { hasPsaToken, fetchCert, fetchAuctionPrices, findCandidateCards } from './psa.js';
@@ -724,6 +724,8 @@ export default function App() {
     : collections.find(c => c.id === activeCollectionId);
   const activeEntries = (isAllMode ? entries : entries.filter(e => e.collection_id === activeCollectionId))
     .filter(e => !e.date_sold); // sold cards are retained but leave the active Collection
+  const soldEntries = (isAllMode ? entries : entries.filter(e => e.collection_id === activeCollectionId))
+    .filter(e => e.date_sold);
 
   if (loading || catalogLoading) {
     return (
@@ -776,6 +778,9 @@ export default function App() {
               setEditingEntry(entry);
             }}
           />
+        )}
+        {view === 'sold' && (
+          <SoldView entries={soldEntries} catalogIndex={catalogIndex} variantRev={variantRev} />
         )}
         {view === 'search' && (
           <SearchView
@@ -1020,6 +1025,9 @@ function Header({ view, setView, collections, activeCollectionId, setActiveColle
       <nav className="op-nav">
         <button className={`op-nav-btn ${view === 'collection' ? 'is-active' : ''}`} onClick={() => setView('collection')}>
           <Folder size={15} /> Collection
+        </button>
+        <button className={`op-nav-btn ${view === 'sold' ? 'is-active' : ''}`} onClick={() => setView('sold')}>
+          <Archive size={15} /> Sold
         </button>
         <button className={`op-nav-btn ${view === 'transactions' ? 'is-active' : ''}`} onClick={() => setView('transactions')}>
           <BarChart3 size={15} /> Transactions
@@ -1395,6 +1403,61 @@ function CollectionView({ collection, entries, transactions = [], catalogIndex, 
 //
 // Entries without a `contributions` array fall back to a single contribution
 // of `purchase_price` attributed to `owner_name` (or "Unattributed").
+// Sold / history view — cards retained after sale (date_sold set), with realized P&L.
+function SoldView({ entries = [], catalogIndex, variantRev = 0 }) {
+  const money = (n) => `$${(Number(n) || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  const signed = (n) => `${n >= 0 ? '+' : '-'}${money(Math.abs(n))}`;
+  const plColor = (n) => (n > 0 ? '#3d7a4a' : n < 0 ? '#c8442a' : '#888');
+
+  const rows = useMemo(() => entries.map(e => {
+    const card = catalogIndex.get(e.card_id);
+    const cost = Number(e.purchase_price) || 0;
+    const sold = Number(e.sold_price) || 0;
+    return { e, card, cost, sold, pl: sold - cost };
+  }).sort((a, b) => (b.e.date_sold || '').localeCompare(a.e.date_sold || '')), [entries, catalogIndex, variantRev]);
+
+  const totals = rows.reduce((t, r) => ({ cost: t.cost + r.cost, sold: t.sold + r.sold, pl: t.pl + r.pl }), { cost: 0, sold: 0, pl: 0 });
+
+  return (
+    <div className="op-view">
+      <div className="op-page-head">
+        <div>
+          <div className="op-eyebrow">Collection</div>
+          <h1 className="op-page-title">Sold</h1>
+          <div className="op-page-sub">
+            {rows.length} sold · proceeds {money(totals.sold)} · cost {money(totals.cost)} ·{' '}
+            <span style={{ color: plColor(totals.pl), fontWeight: 600 }}>realized {signed(totals.pl)}</span>
+          </div>
+        </div>
+      </div>
+      {rows.length === 0 ? (
+        <div style={{ padding: '2rem', opacity: 0.6 }}>No sold cards yet.</div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {rows.map(({ e, card, cost, sold, pl }) => (
+            <div key={e.id} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '8px 12px', background: 'rgba(255,255,255,0.03)', borderRadius: 8 }}>
+              <CardThumb card={card} size={44} />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontWeight: 600 }}>{card?.name || e.card_id}</div>
+                <div style={{ fontSize: 12, opacity: 0.6 }}>
+                  {card?.displayId || ''}{card?.variantKey && card.variantKey !== 'base' ? ` · ${card.variantKey}` : ''}
+                  {e.grading_company ? ` · ${e.grading_company} ${e.grade ?? ''}` : ''}
+                </div>
+                <div style={{ fontSize: 12, opacity: 0.5 }}>{e.acquired_at || '—'} → {e.date_sold}</div>
+              </div>
+              <div style={{ textAlign: 'right', fontSize: 13, whiteSpace: 'nowrap' }}>
+                <div style={{ opacity: 0.7 }}>cost {money(cost)}</div>
+                <div style={{ opacity: 0.7 }}>sold {money(sold)}</div>
+                <div style={{ color: plColor(pl), fontWeight: 600 }}>{signed(pl)}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function EquityPanel({ entries, transactions = [], catalogIndex, totalMarket, collectionId }) {
   const [mode, setMode] = useState('capital');
 
