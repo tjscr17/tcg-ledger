@@ -163,7 +163,7 @@ const CONDITIONS = ['Mint', 'Near Mint', 'Lightly Played', 'Moderately Played', 
 // Grading companies + per-company allowed grades. Pure UI data — the app no
 // longer auto-fetches graded prices, so these only populate the dropdowns
 // in AddCardModal's grading section. Half-grades only meaningful at 9.5.
-const GRADING_COMPANIES = ['PSA', 'BGS', 'CGC', 'SGC'];
+const GRADING_COMPANIES = ['PSA', 'BGS', 'CGC'];
 const GRADES_BY_COMPANY = {
   PSA: [10, 9.5, 9, 8, 7],
   BGS: [10, 9.5, 9, 8, 7],
@@ -691,11 +691,15 @@ export default function App() {
     const entry = entries.find(e => e.id === id);
     if (!entry) return;
     await logTransaction({ type: 'sell', entry, sale });
-    await store.remove('entries', id);
+    // Retain model: stamp the sale outcome instead of deleting the card, so its
+    // history + realized P&L survive. It leaves the active Collection (date_sold
+    // is set, filtered out below) but stays in the DB for a Sold/history view.
+    await store.update('entries', id, {
+      date_sold: sale?.date || new Date().toISOString().slice(0, 10),
+      sold_price: Number(sale?.amount) || 0,
+    });
     setEntries(entries.filter(e => e.id !== id));
-    // Don't delete linked card-expense txs — they're part of the cost-basis
-    // story that the equity panel still needs to attribute capital correctly.
-    // The entry is gone but the historical expense remains in the ledger.
+    // Linked card-expense txs stay — part of the cost-basis story for equity.
   };
 
   // Manual transaction removal. Used to clean up mis-logged transfers/expenses
@@ -718,7 +722,8 @@ export default function App() {
   const activeCollection = isAllMode
     ? { id: 'all', name: 'All Collections', members: allMembers, synthetic: true }
     : collections.find(c => c.id === activeCollectionId);
-  const activeEntries = isAllMode ? entries : entries.filter(e => e.collection_id === activeCollectionId);
+  const activeEntries = (isAllMode ? entries : entries.filter(e => e.collection_id === activeCollectionId))
+    .filter(e => !e.date_sold); // sold cards are retained but leave the active Collection
 
   if (loading || catalogLoading) {
     return (
