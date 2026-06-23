@@ -4029,6 +4029,7 @@ function TransactionsView({ transactions, collections, entries = [], catalog = [
               key={t.id}
               tx={t}
               collection={collectionsById.get(t.collection_id)}
+              catalogIndex={catalogIndex}
               onEdit={() => setEditingTx(t)}
               onDelete={() => {
                 const label = t.type === 'transfer' ? 'transfer'
@@ -4064,8 +4065,23 @@ function TransactionsView({ transactions, collections, entries = [], catalog = [
   );
 }
 
-function TransactionRow({ tx, collection, onEdit, onDelete }) {
+function TransactionRow({ tx, collection, catalogIndex, onEdit, onDelete }) {
   const amount = Number(tx.amount) || 0;
+  // Derive the label from the live catalog (new card_code + variant identity)
+  // rather than the name stored when the row was logged — migrated rows carry
+  // legacy descriptive names ("... SP Silver", "... 1st Anniversary Set").
+  // Preserve a leading descriptor (e.g. "Grading fee") from the stored name.
+  const card = tx.card_id && catalogIndex ? catalogIndex.get(tx.card_id) : null;
+  let display;
+  if (card) {
+    const clean = `${card.displayId || card.id} · ${card.name}${card.variantKey && card.variantKey !== 'base' ? ` · ${card.variantKey}` : ''}`;
+    const stored = tx.card_display_name || '';
+    const sep = stored.indexOf(' · ');
+    const prefix = sep > 0 && /fee|shipping|grading|postage/i.test(stored.slice(0, sep)) ? stored.slice(0, sep) : '';
+    display = prefix ? `${prefix} · ${clean}` : clean;
+  } else {
+    display = tx.card_display_name || tx.card_id || '(no description)';
+  }
   // Visual style + sign per type
   const meta = {
     buy:      { label: 'BUY',      cls: 'is-buy',      tone: 'is-neg', sign: '−' },
@@ -4079,7 +4095,7 @@ function TransactionRow({ tx, collection, onEdit, onDelete }) {
     <div className={`op-tx-row ${meta.cls}`}>
       <div className="op-tx-type">{meta.label}</div>
       <div className="op-tx-main">
-        <div className="op-tx-card">{tx.card_display_name || tx.card_id || '(no description)'}</div>
+        <div className="op-tx-card">{display}</div>
         <div className="op-tx-meta">
           {collection?.name || '—'}
           {tx.occurred_at && <> · {tx.occurred_at}</>}
