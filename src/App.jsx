@@ -750,6 +750,11 @@ export default function App() {
         collection_id: collId,
         condition: inc.condition || 'Near Mint',
         purchase_price: Number(inc.purchase_price) || 0,
+        grading_company: inc.grading_company || null,
+        grade: inc.grade ?? null,
+        bgs_black: Boolean(inc.bgs_black),
+        cert_number: inc.cert_number || null,
+        graded_price: inc.graded_price ?? null,
         contributions: [],
         notes: tag,
         acquired_at: when,
@@ -3023,7 +3028,11 @@ function TradeModal({ members = [], collection, entries = [], catalog = [], cata
 
   const addIncoming = (card) => {
     const cid = card.canonicalId || card.id;
-    setIncoming(prev => [...prev, { key: uid(), card_id: cid, name: card.name, displayId: card.displayId || card.id, purchase_price: '', condition: 'Near Mint' }]);
+    setIncoming(prev => [...prev, {
+      key: uid(), card_id: cid, name: card.name, displayId: card.displayId || card.id,
+      purchase_price: '', condition: 'Near Mint',
+      graded: false, grading_company: 'PSA', grade: 10, bgs_black: false, cert_number: '', graded_price: '',
+    }]);
     setQuery('');
   };
   const updateIncoming = (key, patch) => setIncoming(prev => prev.map(i => i.key === key ? { ...i, ...patch } : i));
@@ -3051,7 +3060,16 @@ function TradeModal({ members = [], collection, entries = [], catalog = [], cata
       date: date || null,
       notes: notes.trim(),
       outgoing: outgoing.map(o => ({ entryId: o.entryId, value: Number(o.value) || 0 })),
-      incoming: incoming.map(i => ({ card_id: i.card_id, purchase_price: Number(i.purchase_price) || 0, condition: i.condition })),
+      incoming: incoming.map(i => ({
+        card_id: i.card_id,
+        purchase_price: Number(i.purchase_price) || 0,
+        condition: i.condition,
+        grading_company: i.graded ? i.grading_company : null,
+        grade: i.graded ? i.grade : null,
+        bgs_black: Boolean(i.graded && i.grading_company === 'BGS' && Number(i.grade) === 10 && i.bgs_black),
+        cert_number: i.graded ? (i.cert_number?.trim() || null) : null,
+        graded_price: i.graded ? (Number(i.graded_price) || null) : null,
+      })),
       cash: cashDir === 'none' ? null : { dir: cashDir, amount: cashAmt, member: cashMember || null },
     });
     setSaving(false);
@@ -3115,17 +3133,51 @@ function TradeModal({ members = [], collection, entries = [], catalog = [], cata
             </div>
           )}
           {incoming.map(i => (
-            <div key={i.key} className="op-form-row" style={{ alignItems: 'flex-end', gap: 8 }}>
-              <div style={{ flex: 1, fontSize: 13, paddingBottom: 8 }}>{i.displayId} · {i.name}</div>
-              <Field label="Condition">
-                <select value={i.condition} onChange={(e) => updateIncoming(i.key, { condition: e.target.value })}>
-                  {CONDITIONS.map(c => <option key={c} value={c}>{c}</option>)}
-                </select>
-              </Field>
-              <Field label="Cost basis">
-                <input type="number" step="0.01" value={i.purchase_price} onChange={(e) => updateIncoming(i.key, { purchase_price: e.target.value })} placeholder="0.00" />
-              </Field>
-              <button style={{ ...iconBtn, paddingBottom: 10 }} onClick={() => removeIncoming(i.key)} title="Remove"><Trash2 size={15} /></button>
+            <div key={i.key} style={{ border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8, padding: 10, marginBottom: 8 }}>
+              <div className="op-form-row" style={{ alignItems: 'flex-end', gap: 8 }}>
+                <div style={{ flex: 1, fontSize: 13, paddingBottom: 8 }}>{i.displayId} · {i.name}</div>
+                <Field label="Condition">
+                  <select value={i.condition} onChange={(e) => updateIncoming(i.key, { condition: e.target.value })}>
+                    {CONDITIONS.map(c => <option key={c} value={c}>{c}</option>)}
+                  </select>
+                </Field>
+                <Field label="Cost basis">
+                  <input type="number" step="0.01" value={i.purchase_price} onChange={(e) => updateIncoming(i.key, { purchase_price: e.target.value })} placeholder="0.00" />
+                </Field>
+                <button style={{ ...iconBtn, paddingBottom: 10 }} onClick={() => removeIncoming(i.key)} title="Remove"><Trash2 size={15} /></button>
+              </div>
+              <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13, cursor: 'pointer' }}>
+                <input type="checkbox" checked={i.graded} onChange={(e) => updateIncoming(i.key, { graded: e.target.checked })} />
+                <span>Graded</span>
+              </label>
+              {i.graded && (
+                <>
+                  <div className="op-form-row" style={{ gap: 8, marginTop: 6 }}>
+                    <Field label="Company">
+                      <select value={i.grading_company} onChange={(e) => updateIncoming(i.key, { grading_company: e.target.value, bgs_black: false })}>
+                        {GRADING_COMPANIES.map(c => <option key={c} value={c}>{c}</option>)}
+                      </select>
+                    </Field>
+                    <Field label="Grade">
+                      <select value={i.grade} onChange={(e) => updateIncoming(i.key, { grade: Number(e.target.value) })}>
+                        {(GRADES_BY_COMPANY[i.grading_company] || []).map(g => <option key={g} value={g}>{g}</option>)}
+                      </select>
+                    </Field>
+                    <Field label="Graded price">
+                      <input type="number" step="0.01" value={i.graded_price} onChange={(e) => updateIncoming(i.key, { graded_price: e.target.value })} placeholder="0.00" />
+                    </Field>
+                  </div>
+                  {i.grading_company === 'BGS' && Number(i.grade) === 10 && (
+                    <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 13, cursor: 'pointer', marginTop: 4 }}>
+                      <input type="checkbox" checked={i.bgs_black} onChange={(e) => updateIncoming(i.key, { bgs_black: e.target.checked })} />
+                      <span>Black Label (Perfect 10)</span>
+                    </label>
+                  )}
+                  <Field label="Cert # (optional)">
+                    <input type="text" value={i.cert_number} onChange={(e) => updateIncoming(i.key, { cert_number: e.target.value })} placeholder="e.g. 12345678" />
+                  </Field>
+                </>
+              )}
             </div>
           ))}
 
