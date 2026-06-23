@@ -1580,7 +1580,7 @@ function AddExternalCardModal({ onClose, onAdded }) {
   };
 
   return (
-    <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'flex-start', justifyContent: 'center', padding: '8vh 16px', zIndex: 1000 }}>
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'flex-start', justifyContent: 'center', padding: '8vh 16px', zIndex: 1000 }}>
       <div onClick={e => e.stopPropagation()} style={{ width: '100%', maxWidth: 560, background: '#1c1a17', border: '1px solid rgba(255,255,255,0.12)', borderRadius: 12, padding: 16, maxHeight: '84vh', overflowY: 'auto', boxShadow: '0 20px 60px rgba(0,0,0,0.5)', display: 'flex', flexDirection: 'column', gap: 12 }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <h2 style={{ margin: 0, fontSize: 18 }}>Add a missing card</h2>
@@ -2375,7 +2375,7 @@ function SellModal({ entry, card, members = [], onClose, onSave }) {
   };
 
   return (
-    <div className="op-modal-backdrop" onClick={onClose}>
+    <div className="op-modal-backdrop">
       <div className="op-modal" onClick={(e) => e.stopPropagation()}>
         <button className="op-modal-close" onClick={onClose}><X size={18} /></button>
         <div className="op-modal-header">
@@ -2731,7 +2731,7 @@ function AddByCertModal({ catalog, collections, activeCollectionId, onClose, onS
   }, [catalog, pickerQ]);
 
   return (
-    <div className="op-modal-backdrop" onClick={onClose}>
+    <div className="op-modal-backdrop">
       <div className="op-modal" onClick={(e) => e.stopPropagation()}>
         <button className="op-modal-close" onClick={onClose}><X size={18} /></button>
         <div className="op-modal-header">
@@ -3094,7 +3094,7 @@ function TradeModal({ members = [], collection, entries = [], catalog = [], cata
   };
 
   return (
-    <div className="op-modal-backdrop" onClick={onClose}>
+    <div className="op-modal-backdrop">
       <div className="op-modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 640 }}>
         <button className="op-modal-close" onClick={onClose}><X size={18} /></button>
         <div className="op-modal-header">
@@ -3284,7 +3284,7 @@ function TransferModal({ members = [], collection, onClose, onSave }) {
   };
 
   return (
-    <div className="op-modal-backdrop" onClick={onClose}>
+    <div className="op-modal-backdrop">
       <div className="op-modal" onClick={(e) => e.stopPropagation()}>
         <button className="op-modal-close" onClick={onClose}><X size={18} /></button>
         <div className="op-modal-header">
@@ -3384,7 +3384,7 @@ function ExpenseModal({ members = [], collection, card = null, entry = null, onC
   };
 
   return (
-    <div className="op-modal-backdrop" onClick={onClose}>
+    <div className="op-modal-backdrop">
       <div className="op-modal" onClick={(e) => e.stopPropagation()}>
         <button className="op-modal-close" onClick={onClose}><X size={18} /></button>
         <div className="op-modal-header">
@@ -3502,7 +3502,7 @@ function PayoutModal({ members = [], collection, onClose, onSave }) {
   };
 
   return (
-    <div className="op-modal-backdrop" onClick={onClose}>
+    <div className="op-modal-backdrop">
       <div className="op-modal" onClick={(e) => e.stopPropagation()}>
         <button className="op-modal-close" onClick={onClose}><X size={18} /></button>
         <div className="op-modal-header">
@@ -3656,7 +3656,7 @@ function BulkGradingModal({ entries, catalogIndex, members = [], collectionId, o
   };
 
   return (
-    <div className="op-modal-backdrop" onClick={onClose}>
+    <div className="op-modal-backdrop">
       <div className="op-modal op-modal-wide" onClick={(e) => e.stopPropagation()}>
         <button className="op-modal-close" onClick={onClose}><X size={18} /></button>
         <div className="op-modal-header">
@@ -4109,7 +4109,7 @@ function VariantsModal({ onClose }) {
   };
 
   return (
-    <div className="op-modal-backdrop" onClick={onClose}>
+    <div className="op-modal-backdrop">
       <div className="op-modal" onClick={(e) => e.stopPropagation()}>
         <button className="op-modal-close" onClick={onClose}><X size={18} /></button>
         <div className="op-modal-header">
@@ -4690,7 +4690,7 @@ function AddCardModal({ card, entry, collections, activeCollectionId, onClose, o
   };
 
   return (
-    <div className="op-modal-backdrop" onClick={onClose}>
+    <div className="op-modal-backdrop">
       <div className="op-modal" onClick={(e) => e.stopPropagation()}>
         <button className="op-modal-close" onClick={onClose}><X size={18} /></button>
         <div className="op-modal-header">
@@ -5510,7 +5510,7 @@ function LogSaleModal({ catalog, catalogIndex, existing, prefillCard, knownMarke
   };
 
   return (
-    <div className="op-modal-backdrop" onClick={onClose}>
+    <div className="op-modal-backdrop">
       <div className="op-modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 540 }}>
         <div className="op-modal-head">
           <div>
