@@ -193,6 +193,10 @@ const txAttributedTotal = (tx) => {
   return list.reduce((s, c) => s + Math.abs(Number(c.amount) || 0), 0);
 };
 const isTxFullyAttributed = (tx) => {
+  // A trade's card legs (buy/sell tagged "Trade") move no cash — it's a swap —
+  // so there's nothing to attribute. A trade's cash leg (expense/payout) is NOT
+  // exempt and still has to be attributed below.
+  if ((tx.type === 'buy' || tx.type === 'sell') && /^trade\b/i.test(String(tx.notes || '').trim())) return true;
   const amt = Math.abs(Number(tx.amount) || 0);
   if (amt < 0.01) return true;
   return Math.abs(txAttributedTotal(tx) - amt) < 0.01;
@@ -896,9 +900,28 @@ export default function App() {
       <main className="op-main">
         {view === 'collection' && (
           <>
-            <div className="op-subtabs" style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap' }}>
+            {/* Permanent summary (cash-flow totals + equity) across all sub-tabs. */}
+            <CollectionSummary
+              transactions={transactions}
+              activeEntries={activeEntries}
+              collections={collections}
+              activeCollectionId={activeCollectionId}
+              catalogIndex={catalogIndex}
+              variantRev={variantRev}
+            />
+
+            {/* Segmented control to switch sub-tab, sitting below the tables. */}
+            <div style={{ display: 'inline-flex', background: 'rgba(255,255,255,0.05)', borderRadius: 10, padding: 4, gap: 4, margin: '4px 0 16px' }}>
               {[['holdings', 'Collection'], ['sold', 'Sold'], ['transactions', 'Transactions']].map(([k, label]) => (
-                <button key={k} className={`op-nav-btn ${collectionTab === k ? 'is-active' : ''}`} onClick={() => setCollectionTab(k)}>
+                <button
+                  key={k}
+                  onClick={() => setCollectionTab(k)}
+                  style={{
+                    padding: '8px 18px', borderRadius: 7, border: 'none', cursor: 'pointer', fontSize: 14, fontWeight: 600,
+                    background: collectionTab === k ? 'rgba(255,255,255,0.16)' : 'transparent',
+                    color: collectionTab === k ? '#fff' : 'rgba(255,255,255,0.55)',
+                  }}
+                >
                   {label}
                 </button>
               ))}
@@ -1577,9 +1600,6 @@ function AddExternalCardModal({ onClose, onAdded }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
-  const btn = { padding: '8px 14px', borderRadius: 8, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(255,255,255,0.08)', color: 'inherit', cursor: 'pointer', fontSize: 13 };
-  const input = { width: '100%', padding: '8px 10px', borderRadius: 8, border: '1px solid rgba(255,255,255,0.15)', background: 'rgba(0,0,0,0.25)', color: 'inherit', fontSize: 14, boxSizing: 'border-box' };
-
   const doSearch = async () => {
     setError(''); setSelected(null); setResults(null);
     if (!number.trim()) return;
@@ -1615,64 +1635,126 @@ function AddExternalCardModal({ onClose, onAdded }) {
   };
 
   return (
-    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'flex-start', justifyContent: 'center', padding: '8vh 16px', zIndex: 1000 }}>
-      <div onClick={e => e.stopPropagation()} style={{ width: '100%', maxWidth: 560, background: '#1c1a17', border: '1px solid rgba(255,255,255,0.12)', borderRadius: 12, padding: 16, maxHeight: '84vh', overflowY: 'auto', boxShadow: '0 20px 60px rgba(0,0,0,0.5)', display: 'flex', flexDirection: 'column', gap: 12 }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <h2 style={{ margin: 0, fontSize: 18 }}>Add a missing card</h2>
-          <button type="button" onClick={onClose} style={{ ...btn, padding: 6, background: 'transparent', border: 'none' }}><X size={18} /></button>
-        </div>
-        <p style={{ fontSize: 13, opacity: 0.7, margin: 0 }}>
-          For printings the official cardlist is missing (tournament / promo cards). Look it up on TCGplayer by card number, pick the exact printing, and it's added to the catalog.
-        </p>
-        <div style={{ display: 'flex', gap: 8 }}>
-          <input
-            autoFocus
-            placeholder="Card number, e.g. OP09-004 or P-041"
-            value={number}
-            onChange={e => setNumber(e.target.value)}
-            onKeyDown={e => e.key === 'Enter' && doSearch()}
-            style={{ ...input, flex: 1 }}
-          />
-          <button type="button" onClick={doSearch} disabled={busy} style={btn}>{busy && !selected ? '…' : 'Search'}</button>
-        </div>
-
-        {error && <div style={{ color: '#ff8c7a', fontSize: 13 }}>{error}</div>}
-        {results && results.length === 0 && <div style={{ opacity: 0.6, fontSize: 13 }}>No TCGplayer products found for that number.</div>}
-
-        {results && results.length > 0 && (
-          <div style={{ maxHeight: 320, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 6 }}>
-            {results.map(p => (
-              <div
-                key={p.tcg_id}
-                onClick={() => pick(p)}
-                style={{ display: 'flex', gap: 10, alignItems: 'center', padding: 8, borderRadius: 8, cursor: 'pointer',
-                  border: selected?.tcg_id === p.tcg_id ? '1px solid #6aa9ff' : '1px solid transparent',
-                  background: selected?.tcg_id === p.tcg_id ? 'rgba(106,169,255,0.12)' : 'rgba(255,255,255,0.03)' }}
-              >
-                {p.image_url
-                  ? <img src={p.image_url} alt="" style={{ width: 38, height: 53, objectFit: 'cover', borderRadius: 4, flexShrink: 0 }} />
-                  : <div style={{ width: 38, height: 53, flexShrink: 0, borderRadius: 4, background: 'rgba(255,255,255,0.05)' }} />}
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 13 }}>{p.name}</div>
-                  <div style={{ fontSize: 11, opacity: 0.6 }}>{p.number} · {p.rarity || '—'} · pid {p.tcg_id}</div>
-                </div>
-              </div>
-            ))}
+    <div className="op-modal-backdrop">
+      <div className="op-modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 560 }}>
+        <button className="op-modal-close" onClick={onClose}><X size={18} /></button>
+        <div className="op-modal-header">
+          <div>
+            <div className="op-eyebrow">Add from TCGplayer</div>
+            <div className="op-modal-title">Add a missing card</div>
+            <div className="op-modal-sub">For printings the official cardlist is missing (tournament / promo). Look it up by number, pick the printing, and it's added to the catalog.</div>
           </div>
-        )}
+        </div>
 
-        {selected && (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: 12 }}>
-            <div style={{ fontSize: 13 }}>Adding <strong>{selected.number}</strong> — {selected.clean_name || selected.name}</div>
-            <label style={{ fontSize: 12, opacity: 0.7 }}>Variant label (distinguishes it from other printings of this number)</label>
-            <input value={variantKey} onChange={e => setVariantKey(e.target.value)} style={input} />
-            <button type="button" onClick={add} disabled={busy || !variantKey.trim()} style={{ ...btn, background: '#2f6b3d', borderColor: '#2f6b3d' }}>
-              {busy ? 'Adding…' : 'Add to catalog'}
+        <div className="op-form">
+          <div className="op-search-bar">
+            <Search size={18} className="op-search-icon" />
+            <input
+              autoFocus
+              className="op-search-input"
+              placeholder="Card number, e.g. OP09-004 or P-041"
+              value={number}
+              onChange={e => setNumber(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && doSearch()}
+            />
+            <button className="op-btn-primary" onClick={doSearch} disabled={busy} style={{ marginLeft: 8 }}>
+              {busy && !selected ? '…' : 'Search'}
             </button>
           </div>
-        )}
+
+          {error && <div style={{ color: '#ff8c7a', fontSize: 13 }}>{error}</div>}
+          {results && results.length === 0 && <div style={{ opacity: 0.6, fontSize: 13 }}>No TCGplayer products found for that number.</div>}
+
+          {results && results.length > 0 && (
+            <div style={{ maxHeight: 320, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {results.map(p => (
+                <div
+                  key={p.tcg_id}
+                  onClick={() => pick(p)}
+                  style={{ display: 'flex', gap: 10, alignItems: 'center', padding: 8, borderRadius: 8, cursor: 'pointer',
+                    border: selected?.tcg_id === p.tcg_id ? '1px solid #6aa9ff' : '1px solid rgba(255,255,255,0.08)',
+                    background: selected?.tcg_id === p.tcg_id ? 'rgba(106,169,255,0.14)' : 'rgba(255,255,255,0.04)' }}
+                >
+                  {p.image_url
+                    ? <img src={p.image_url} alt="" style={{ width: 38, height: 53, objectFit: 'cover', borderRadius: 4, flexShrink: 0 }} />
+                    : <div style={{ width: 38, height: 53, flexShrink: 0, borderRadius: 4, background: 'rgba(255,255,255,0.06)' }} />}
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 13 }}>{p.name}</div>
+                    <div style={{ fontSize: 11, opacity: 0.6 }}>{p.number} · {p.rarity || '—'} · pid {p.tcg_id}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {selected && (
+            <>
+              <div style={{ fontSize: 13, borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: 12 }}>
+                Adding <strong>{selected.number}</strong> — {selected.clean_name || selected.name}
+              </div>
+              <Field label="Variant label (distinguishes it from other printings of this number)">
+                <input value={variantKey} onChange={e => setVariantKey(e.target.value)} />
+              </Field>
+              <div className="op-form-actions">
+                <button className="op-btn-ghost" onClick={onClose} disabled={busy}>Cancel</button>
+                <button className="op-btn-primary" onClick={add} disabled={busy || !variantKey.trim()}>
+                  {busy ? 'Adding…' : 'Add to catalog'}
+                </button>
+              </div>
+            </>
+          )}
+        </div>
       </div>
     </div>
+  );
+}
+
+// Persistent summary at the top of the Collection tab — cash-flow totals (Net
+// first) + the equity panel — scoped to the active collection (header picker),
+// shown across the Collection / Sold / Transactions sub-tabs.
+function CollectionSummary({ transactions = [], activeEntries = [], collections = [], activeCollectionId, catalogIndex, variantRev = 0 }) {
+  const isAll = !activeCollectionId || activeCollectionId === 'all';
+  const scopedTxs = useMemo(
+    () => isAll ? transactions : transactions.filter(t => t.collection_id === activeCollectionId),
+    [transactions, activeCollectionId, isAll]
+  );
+  const totals = useMemo(() => {
+    let bought = 0, sold = 0, expenses = 0, payouts = 0;
+    for (const t of scopedTxs) {
+      if (t.type === 'buy') bought += Number(t.amount) || 0;
+      else if (t.type === 'sell') sold += Number(t.amount) || 0;
+      else if (t.type === 'expense') expenses += Number(t.amount) || 0;
+      else if (t.type === 'payout') payouts += Number(t.amount) || 0;
+    }
+    return { bought, sold, expenses, payouts, net: sold - bought - expenses - payouts };
+  }, [scopedTxs]);
+  const equityNav = useMemo(() => {
+    let nav = 0;
+    for (const e of activeEntries) {
+      if (e.grading_company) nav += Number(e.graded_price) || 0;
+      else { const c = catalogIndex.get(e.card_id); if (c) nav += effectiveRawPrice(c); }
+    }
+    return nav;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeEntries, catalogIndex, variantRev]);
+
+  return (
+    <>
+      <div className="op-stats">
+        <Stat label="Net cash flow" value={`${totals.net >= 0 ? '+' : ''}$${totals.net.toFixed(2)}`} tone={totals.net >= 0 ? 'pos' : 'neg'} />
+        <Stat label="Bought" value={`$${totals.bought.toFixed(2)}`} />
+        <Stat label="Sold" value={`$${totals.sold.toFixed(2)}`} accent />
+        <Stat label="Expenses" value={`$${totals.expenses.toFixed(2)}`} />
+        <Stat label="Payouts" value={`$${totals.payouts.toFixed(2)}`} />
+      </div>
+      <EquityPanel
+        entries={activeEntries}
+        transactions={transactions}
+        collectionId={isAll ? 'all' : activeCollectionId}
+        catalogIndex={catalogIndex}
+        totalMarket={equityNav}
+      />
+    </>
   );
 }
 
@@ -3906,23 +3988,6 @@ function TransactionsView({ transactions, collections, entries = [], catalog = [
     [entries, collectionFilter]
   );
 
-  // Effective NAV across the entries the equity panel uses.
-  const equityNav = useMemo(() => {
-    let nav = 0;
-    for (const e of equityEntries) {
-      if (e.grading_company) {
-        // Graded entry: only count if the user has entered a graded_price.
-        // Raw fallback would distort NAV (a PSA 10 isn't worth raw price).
-        nav += Number(e.graded_price) || 0;
-      } else {
-        const c = catalogIndex.get(e.card_id);
-        if (c) nav += effectiveRawPrice(c);
-      }
-    }
-    return nav;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [equityEntries, catalogIndex, variantRev]);
-
   const filtered = useMemo(() => {
     const needle = search.trim().toLowerCase();
     return transactions
@@ -3952,17 +4017,6 @@ function TransactionsView({ transactions, collections, entries = [], catalog = [
     return [...s].sort();
   }, [transactions]);
 
-  const totals = useMemo(() => {
-    let bought = 0, sold = 0, expenses = 0, payouts = 0;
-    for (const t of filtered) {
-      if (t.type === 'buy') bought += Number(t.amount) || 0;
-      if (t.type === 'sell') sold += Number(t.amount) || 0;
-      if (t.type === 'expense') expenses += Number(t.amount) || 0;
-      if (t.type === 'payout') payouts += Number(t.amount) || 0;
-    }
-    return { bought, sold, expenses, payouts, net: sold - bought - expenses - payouts };
-  }, [filtered]);
-
   // For 'All collections' filter we synthesize a collection so the equity
   // panel still has somewhere to live; it gets a special id ('all') that the
   // EquityPanel reads as "don't filter transactions".
@@ -3988,28 +4042,6 @@ function TransactionsView({ transactions, collections, entries = [], catalog = [
           </div>
         </div>
       </div>
-
-      <div className="op-stats">
-        <Stat label="Bought" value={`$${totals.bought.toFixed(2)}`} />
-        <Stat label="Sold" value={`$${totals.sold.toFixed(2)}`} accent />
-        <Stat label="Expenses" value={`$${totals.expenses.toFixed(2)}`} />
-        <Stat label="Payouts" value={`$${totals.payouts.toFixed(2)}`} />
-        <Stat
-          label="Net cash flow"
-          value={`${totals.net >= 0 ? '+' : ''}$${totals.net.toFixed(2)}`}
-          tone={totals.net >= 0 ? 'pos' : 'neg'}
-        />
-      </div>
-
-      {equityCollection && (
-        <EquityPanel
-          entries={equityEntries}
-          transactions={transactions}
-          collectionId={equityCollection.id}
-          catalogIndex={catalogIndex}
-          totalMarket={equityNav}
-        />
-      )}
 
       <div className="op-search-bar" style={{ marginBottom: 12 }}>
         <Search size={18} className="op-search-icon" />
@@ -4196,6 +4228,7 @@ function TransactionRow({ tx, collection, catalogIndex, onEdit, onDelete }) {
   return (
     <div className={`op-tx-row ${meta.cls}`}>
       <div className="op-tx-type">{meta.label}</div>
+      {card && <span style={{ flexShrink: 0 }}><CardThumb card={card} size={34} /></span>}
       <div className="op-tx-main">
         <div className="op-tx-card">
           {display}
