@@ -1,5 +1,12 @@
 # CLAUDE.md
 
+> ⚠️ **READ [`STATUS.md`](STATUS.md) FIRST.** As of 2026-06-23 the app was cut
+> over to a normalized Supabase schema with uuid card identity and a Supabase-
+> sourced catalog. Much of this CLAUDE.md describes the older TCGCSV/canonical-
+> string architecture and is stale. STATUS.md has the current schema, connection
+> details, `.env.local` setup, recent work, and open items. Trust STATUS.md +
+> the code over the sections below.
+
 Working notes for Claude Code on this repo. Reflects what is actually in the
 codebase as of 2026-06-08, not aspirational state. See `PLANNING.md` for
 roadmap and future direction.
