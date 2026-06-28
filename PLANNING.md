@@ -1,7 +1,16 @@
 # PLANNING.md
 
-Roadmap and decisions log. Pairs with `CLAUDE.md` (current state) and
-`CONVERSATION_CONTEXT.md` (long-form product vision).
+Roadmap and decisions log. Pairs with `CLAUDE.md` (current state),
+`STATUS.md` (setup/handoff), and `CONVERSATION_CONTEXT.md` (long-form vision).
+
+> ⚠️ **2026-06-22/23 cutover.** The app was rebuilt onto a **normalized
+> Supabase schema** (`tcgs → sets → cards` with UUID card identity; vault
+> tables `collected_cards` / `transactions` / `transaction_contributions` /
+> `sales`) and the **catalog is now Supabase-sourced** (`source =
+> bandai-official`), not TCGCSV. **The TCGCSV/canonical-string status rows
+> and the "Architectural drift" section below predate that and are
+> historical.** See the cutover entry in the Decisions Log and the corrected
+> snapshot rows. Trust `CLAUDE.md` + the code for current state.
 
 Status conventions:
 - ✅ Built and in production
@@ -13,9 +22,18 @@ Status conventions:
 
 ## Status snapshot — what's actually built
 
+> **NOTE (2026-06-28):** rows below marked _(pre-cutover)_ describe the
+> retired TCGCSV/canonical-string architecture. Corrected current-state rows
+> are grouped at the top of the table.
+
 | Capability | Status | Notes |
 |---|---|---|
-| Card catalog (TCGPlayer-sourced via TCGCSV) | ✅ | ~5000 products incl. release-event / tournament sets OPTCGAPI didn't ship. Iterates `?groups=1` + `?groupAbbr=X` per group; 24h localStorage cache keyed by `optcg:catalog:v11:<variant-fingerprint>`. OPTCGAPI fully removed 2026-06-01. |
+| **Card catalog (Supabase-sourced)** | ✅ | **CURRENT.** `cards` table in project `ajpxzfhmyzzgarewijnr`, `source='bandai-official'`, ~4,575 EN cards across 295 sets. Identity = `cards.id` UUID; `card_code` + `variant_key` are human identity. 24h cache `optcg:catalog:v13-supabase`. `catalog.js` uses a hardcoded read-only client. |
+| **Normalized relational schema** | ✅ | **CURRENT.** `tcgs → sets → cards`, `grades`, vault tables `collected_cards` / `transactions` / `transaction_contributions` / `sales` / `collections` / `watchlist` / `card_aliases`. `storage.js` translates the app's logical tables onto these. |
+| **Live pricing** | ⬜ | **CURRENT.** No price feed post-cutover. Owned-card value = cost basis (graded cards keep manual/estimated `graded_price`), centralized in `entryMarketValue`. Browse views show $0. Real value (sales-median) is Pricing Stage 3. |
+| **Multi-TCG** | 🟡 | **CURRENT.** DB ready (`tcgs`, `collections.tcg_code`); `PKMN` stub row exists (0 cards). Front-end catalog loader is still OP-only (no `tcg_code` filter; hardcoded `source` list). |
+| **Trade flow / editable transactions** | ✅ | **CURRENT (2026-06-23).** `TradeModal` (cards-for-cards + cash), per-row edit/delete, unattributed badge, consolidated Collection/Sold/Transactions sub-tabs. |
+| Card catalog (TCGPlayer-sourced via TCGCSV) | ❌ _(pre-cutover)_ | Retired 2026-06-22. ~5000 products via `?groups=1` + `?groupAbbr=X`; cache `optcg:catalog:v11:<fingerprint>`. Replaced by the Supabase catalog above. |
 | Set / Rarity / Sort filters in Search | ✅ | Plus expand/collapse Hide-rarities row. Color / Type / Cost / Power filters dropped with the catalog-source switch (TCGPlayer has no game data). |
 | Collection-level cost basis & P&L | ✅ | Cost basis = `purchase_price + linked card-scoped expenses` |
 | Per-entry actions (edit, expense, sell, delete) | ✅ | Trash icon = silent delete (no tx); $ icon = sell flow with proceeds |
@@ -232,30 +250,26 @@ already one of the "before Phase 2" open decisions.
 
 ---
 
-## Architectural drift (resolve before Phase 2)
+## Architectural drift — RESOLVED 2026-06-22/23
 
-The current schema (`collections / entries / transactions / card_resolutions
-/ watchlist` keyed by `vault_key`) is **not** the schema proposed in the
-context doc (`cards / sets / card_mappings / holdings / current_prices /
-price_history / ...` keyed by internal UUID with user-scoped RLS).
+Two of the three drift questions below were settled by the normalized-schema
+cutover; one remains open.
 
-Before any of the data-foundation phases is worth building, decide:
+1. **Card identity — RESOLVED.** Moved to **internal UUID** (`cards.id`) with
+   a relational `tcgs → sets → cards` catalog. `card_code` + `variant_key`
+   are the human identity. This is essentially the context doc's
+   `cards / sets` direction (no separate `card_mappings` table — `variant_key`
+   + `source` cover it). Multi-catalog-source is now structurally supported.
+2. **Ledger immutability — DECIDED (stays mutable).** Transactions and `sales`
+   remain user-deletable by intent (clean up misclassifications rather than
+   let them accumulate). No append-only constraint.
+3. **Auth & multi-tenancy — STILL OPEN.** Kept the `vault_key` + permissive-RLS
+   model through the cutover. Supabase Auth + per-user scoping remains
+   unbuilt and is still the forcing function for Phase 3 alerts and the
+   bug-reporter initiative.
 
-1. **Auth & multi-tenancy** — keep the `vault_key` model (cheap, weak) or
-   move to Supabase Auth + per-user `holdings`? Phase 3+ alerts effectively
-   require per-user notification settings, which is a forcing function for
-   real users.
-2. **Card identity** — keep OPTCG card id as the primary key (current
-   simplicity), or introduce internal UUIDs + `card_mappings` (future-proof
-   for multiple catalog sources)? The Phase 1 TCGCSV join effectively forces
-   this question.
-3. **Ledger immutability** — should `transactions` (or a new `sales`) become
-   strictly append-only? Currently the user can delete any tx. Useful in
-   practice for cleanup; bad for the "sacred sold data" property the context
-   doc wants.
-
-These are noted, not resolved. They belong in the next planning conversation
-with the user, not in a code change.
+> Historical note: this section previously stated the schema was NOT the
+> normalized UUID design. That was true pre-cutover; the cutover adopted it.
 
 ---
 
@@ -312,6 +326,10 @@ shown is the first commit introducing the change.
 | 2026-06-07 | Self-sourced sales pipeline. New `sales` Supabase table (vault-scoped, indexed on `(card_id, grading_company, grade)`) holds observed market sales. New `LogSaleModal` for manual entry; new `SalesView` tab between Watch and Catalog for the filterable log. `estimateGradedPrice(cardId, gradingCompany, grade, opts)` returns median + sample-count + range; the existing "Refresh graded prices" Collection-tab button was repurposed to read this estimator and write to `entries.graded_price` with `graded_price_source='sales-log'`. Manual entries (source='manual') are preserved across refreshes. Drawer gets a "Recent sales for this card" mini-panel (clickable rows → original listing URL) and a "Log a sale" action that pre-fills the card. Schema docs at the top of `src/storage.js`. **Decision NOT taken:** sales rows are user-deletable per row (same as `transactions`) — the user wanted to be able to clean up misclassifications, not have them accumulate into the median. | Earlier graded-price plans (PSA APR alone, eBay-API alone) were each bottlenecked on something the user couldn't control (PSA quota, eBay verification). Owning the data — user logs what they see, plus what an extension scrapes — sidesteps both, and the same table accepts future automated sources without architecture change. | `src/App.jsx` (SalesView, LogSaleModal, estimateGradedPrice, refreshGradedPrices), `src/storage.js` (schema) |
 | 2026-06-07 | Chrome extension for 130point sync. `extension/` (manifest v3) syncs sold listings into the `sales` Supabase table by running fetches from inside the user's 130point.com tab. Architecture: background SW orchestrates; content script (declared on `https://130point.com/*`) does the fetch + DOMParser + parse from same-origin context. Cloudflare blocks any fetch originating from `chrome-extension://` (cross-site) even with `cf_clearance` attached — running inside the tab makes requests look like normal page navigations. Polite 1.2s/query delay. Loosened scraper (post-v0.2) accepts any non-bundle USD result; display-time matcher handles classification. Reclassify-all button + alias additions retroactively fix mis-tagged rows. One-time unique constraint `(vault_key, listing_url)` on `sales` for the upsert dedup. | The user wanted automation but didn't want to set up paid scraping infrastructure or wait on API verifications. Browser-driven scraping via an extension is the architecture that delivered: zero ongoing cost, zero proxy infrastructure, immune to IP blocking. Same pattern would generalize to any future marketplace (eBay sold, Whatnot ended, TCGPlayer marketplace) with a sibling parser. | `extension/manifest.json`, `extension/background.js`, `extension/content.js`, `extension/parser.js`, `extension/popup.html`, `extension/popup.js`, `extension/README.md`, `src/storage.js` (constraint docs) |
 | 2026-06-07 | Smart sale-to-card matcher (`src/sale-matcher.js`) with three new layers on top of card-ID regex: **(1)** user-added **card aliases** (`src/card-aliases.js` + new `card_aliases` Supabase table) match free-text nicknames (e.g. "Dodgers Luffy") to specific canonical_ids using word-based matching (every alias word must be a token in the title; longest total-character-length wins). **(2)** Printing-attribute registry got a new `saleValue` field running against eBay/130point listing titles (where TCGPlayer's parens-required `value` regex doesn't fire). Five new builtins shipped: `dodgers`, `anniversary`, `aniplex`, `judge`, `championship`. Pre-errata added as a builtin too — its `value` is intentionally unreachable (TCGPlayer never labels it) but the `saleValue` catches "Pre-Errata" in listing titles. **(3)** Catalog-name disambiguation — when 1+2 leave the matcher at base but the catalog has multiple variants for that displayId, the matcher scores each variant's `fullName` tokens (excluding the card-ID) against the title and picks the best. Pure function; called once per state change inside App.jsx's `matchedSales` useMemo. SalesView + drawer + estimator + reclassify-all all consume the pre-computed list, avoiding the per-render matcher storm that previously froze the UI on a pre-errata toggle. Strict variant filtering on drawer & estimator (Dodgers Luffy shows only Dodgers sales; base view still shows all variants for the displayId). | The earlier matcher was "card-ID regex + a few hardcoded keywords"; it bucketed many real sales as base and mis-classified the Dodgers Luffy entirely. Catalog already knew about the variants (`(Dodgers)`, `(Manga Rare)`, etc.) — using that knowledge at sale-matching time was the obvious unlock. Word-based aliases mean one "Dodgers Luffy" alias catches "LA Dodgers Luffy" and "Luffy Dodgers Promo" without the user having to register every word-order variant. | `src/sale-matcher.js`, `src/card-aliases.js`, `src/printing-attributes.js`, `src/App.jsx`, `src/storage.js` |
+
+| 2026-06-22 | **Catalog re-sourced TCGCSV → Supabase + schema normalized (the cutover).** New relational catalog `tcgs → sets → cards` (UUID `cards.id` identity, `card_code` + `variant_key` human identity, `source='bandai-official'`) in project `ajpxzfhmyzzgarewijnr`; `catalog.js` loads it via a hardcoded read-only client. Card art proxied through new `api/img.js` (Bandai CDN can't be hotlinked). `searchAlternateSource` / `deriveVariantKey` / `addExternalCard` let a missing printing be added from TCGplayer as `source='tcgplayer'`. Pricing dropped — catalog bakes 0; `pricing.js` graceful at 0; `api/tcgcsv.js` kept only for the alternate-source lookup. | OPTCGAPI/TCGCSV both had gaps and no stable identity; an owned relational catalog with UUID identity is future-proof for multiple TCGs and clean variant handling. | `src/catalog.js`, `api/img.js`, `api/tcgcsv.js` |
+| 2026-06-23 | **Vault tables normalized + app rewired.** `entries → collected_cards`, `transactions` split into `transactions` + `transaction_contributions`, grading collapsed to a `grade_code` FK (`grades` table, full PSA/BGS/CGC scale incl. Black Label / Pristine), `sales` keyed by `ingested_by_vault`. `storage.js` became a translation layer (logical app tables ↔ physical schema); a DB trigger auto-fills `collected_cards.card_code` from `card_id`. UI work: **Trade flow** (cards-for-cards + cash), editable/deletable transactions, consolidated Collection/Sold/Transactions sub-tabs with a persistent summary + equity panel, grading pickers driven by the `grades` table, modals no longer close on backdrop click. **Interim pricing:** owned value = cost basis via `entryMarketValue`. Handoff captured in `STATUS.md`. | Normalizing made identity stable and multi-TCG-capable, and made grading/contributions first-class rather than encoded in JSON blobs. | `src/storage.js`, `src/App.jsx`, `src/grades.js`, `STATUS.md` |
+| 2026-06-28 | Display money via a single module-level `money()` helper (thousands separators); `CLAUDE.md` rewritten to the post-cutover architecture; `PLANNING.md` / `STATUS.md` reconciled. | Docs had drifted a full architecture behind the code after the cutover. | `src/App.jsx`, `CLAUDE.md`, `PLANNING.md`, `STATUS.md` |
 
 ### Decisions explicitly **not** taken (despite the context doc)
 

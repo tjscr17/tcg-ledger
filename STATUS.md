@@ -1,8 +1,10 @@
-# STATUS — current state for picking up on another machine
+# STATUS — machine setup + connection handoff
 
-> Written 2026-06-23. **Read this before CLAUDE.md** — CLAUDE.md describes the
-> pre-cutover TCGCSV/canonical-string architecture and is now largely stale.
-> Trust this file + the code.
+> Written 2026-06-23; setup details current as of 2026-06-28. **`CLAUDE.md` was
+> brought back up to date with the normalized-Supabase cutover on 2026-06-28** —
+> it (plus the code) is the authoritative architecture reference again. This
+> file is the **setup/connection handoff** (env vars, vault keys, project id)
+> plus the running open-items list from the 2026-06-23 session.
 
 ## What this is
 One Piece TCG collection ledger: Vite + React 18 single-file app

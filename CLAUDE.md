@@ -1,390 +1,275 @@
 # CLAUDE.md
 
-> ⚠️ **READ [`STATUS.md`](STATUS.md) FIRST.** As of 2026-06-23 the app was cut
-> over to a normalized Supabase schema with uuid card identity and a Supabase-
-> sourced catalog. Much of this CLAUDE.md describes the older TCGCSV/canonical-
-> string architecture and is stale. STATUS.md has the current schema, connection
-> details, `.env.local` setup, recent work, and open items. Trust STATUS.md +
-> the code over the sections below.
+Working notes for Claude Code on this repo. Reflects the codebase as of
+**2026-06-28**, after the 2026-06-22/23 cutover to a normalized Supabase
+schema with UUID card identity and a Supabase-sourced catalog.
 
-Working notes for Claude Code on this repo. Reflects what is actually in the
-codebase as of 2026-06-08, not aspirational state. See `PLANNING.md` for
-roadmap and future direction.
-
-> **Discrepancies between CONVERSATION_CONTEXT.md and the code are flagged
-> inline below** and consolidated at the bottom. Trust the code.
+> Companion docs: [`STATUS.md`](STATUS.md) is the machine-setup + connection
+> handoff (env vars, vault keys, project id). [`PLANNING.md`](PLANNING.md) is
+> the roadmap + decisions log. `directions/CONVERSATION_CONTEXT.md` is the
+> long-form product vision (aspirational, not current state). **Trust this
+> file + the code over CONVERSATION_CONTEXT.md.**
 
 ---
 
-## What this app does today
+## What this app is
 
-A two-mode web app for tracking a One Piece TCG collection:
+A two-mode web app for tracking a trading-card collection (One Piece TCG
+today; the schema is now multi-TCG — see below):
 
-- **Solo mode** — browser-only, `localStorage` storage, no backend.
-- **Shared mode** — same UI, persistence to Supabase Postgres + Realtime,
-  multi-user via a shared `VITE_VAULT_KEY` secret.
+- **Solo mode** (default) — browser-only, `localStorage`, no backend.
+- **Shared mode** — same UI, persisted to a **normalized Supabase Postgres**
+  schema, multi-user via a shared `VITE_VAULT_KEY` secret. No Supabase Auth;
+  permissive RLS; "knows the vault key" is the entire access boundary.
 
-It is **not** a marketplace, scraper, or fair-value engine yet. It is a
-collection ledger with live read-only pricing from third-party APIs.
-
-### Views (`src/App.jsx`)
-
-| View | Function | What it does |
-|---|---|---|
-| Collection | `CollectionView` | Lists entries in the active collection, with cost basis (paid + linked expenses), market value, and per-entry actions (edit, log expense, sell, delete). |
-| Search | `SearchView` | Browses the TCGPlayer-sourced catalog (~5000 cards including release-event / tournament sets). Filters: set, rarity, sort; expand/collapse Hide-rarities row. |
-| Transactions | `TransactionsView` | Log of buys/sells/transfers/expenses/payouts with totals, type & collection filters, the EquityPanel, and `+ Transfer / + Expense / + Payout / + Bulk grade` actions. |
-| Watch | `WatchView` | Watchlist with target prices and (stub) last-seen-listing fields. |
-| Sales | `SalesView` | Observed market sales log — user-built dataset that feeds the graded-pricing estimator. Filterable by card / company / grade / marketplace / date. Each row clickable through to the original listing URL. **Reclassify all** button re-runs the matcher against every row's title so newly-added aliases / variant rules propagate to stored `card_id`s. Sources today: manual via `LogSaleModal`, scraped via the Chrome extension's 130point sync. |
-| Catalog | `ResolveView` | Renamed from "Resolve" in the nav, internal function name unchanged. Browse every TCGPlayer printing; per-card view shows "Related printings" siblings (base / parallel / manga / event-stamped reprints); **Manage variants** opens the printing-attribute registry; Reported queue surfaces user-flagged cards. The override-resolution picker workflow is retired. |
-
-Modals: `AddCardModal`, `AddByCertModal`, `SellModal`, `TransferModal`,
-`ExpenseModal` (pool-level or entry-scoped), `PayoutModal`, `BulkGradingModal`,
-`VariantsModal` (regex registry), `LogSaleModal` (observed market sale entry),
-`CardDetailDrawer`.
-
-### Equity model (`EquityPanel`)
-
-The most distinctive piece of business logic in the app. Two modes user-toggleable:
-
-- **Capital** — net signed contributions per member, equity % from positive
-  nets. Ignores market timing.
-- **Time-weighted** — fund-accounting unit model. Each contribution issues
-  units priced against current NAV; buys mark NAV up *and* down by the card's
-  market vs cost; sells mark NAV down by the card's current market regardless
-  of proceeds. Earlier contributions to an appreciating pool get larger
-  shares.
-
-Sign convention on transfer contributions: **sender +, receiver −**
-(this was flipped from the original convention; see Decisions Log in
-`PLANNING.md`).
+It is a collection ledger with cost-basis tracking, fund-accounting equity
+math, manual + scraped graded-sales data, and PSA cert ingestion. **There is
+no live price feed right now** — owned-card market value falls back to cost
+basis (see Pricing).
 
 ---
 
-## Stack (actual)
+## Stack
 
 | Layer | Tech |
 |---|---|
-| Frontend | React 18 + Vite 5, plain JSX, no TS |
-| Styles | `src/styles.css` — single hand-written CSS file, BEM-ish `op-*` classes |
+| Frontend | React 18 + Vite 5, plain JSX, no TypeScript |
+| Structure | `src/App.jsx` is a ~5k-line monolith — all views, modals, and the equity engine live here by design. Add new views/modals inline. |
+| Styles | `src/styles.css` — single hand-written file, BEM-ish `op-*` classes |
 | Icons | `lucide-react` |
-| State | React hooks. No Redux/Zustand. Per-component `useState` + `useMemo`. A handful of `useStoredState` for filter persistence. |
-| Storage adapter | `src/storage.js` — `store` exports a uniform `{list, insert, update, remove, removeWhere, subscribe, ...}` interface backed by either `localStorage` (solo) or Supabase (shared) |
-| DB (shared mode) | Supabase Postgres, schema documented inline in `src/storage.js` comments |
-| Realtime (shared mode) | Supabase Realtime channels per table |
-| Auth | **None.** `VITE_VAULT_KEY` is a shared partition key; RLS policies are permissive `using (true)`. README acknowledges this is weak. |
-| Hosting target | Vercel (`api/*.js` serverless functions auto-detected); Netlify works too for the static side |
-| Backend code | Three Vercel serverless functions: [api/psa.js](api/psa.js) — PSA cert proxy; [api/tcgcsv.js](api/tcgcsv.js) — TCGPlayer catalog + price proxy; [api/psa-apr.js](api/psa-apr.js) — PSA Auction Prices Realized proxy (graded-price suggestion). |
-| Dev-time backend mirror | `vite.config.js` `configureServer` middleware mirrors `/api/psa`, `/api/tcgcsv`, and `/api/psa-apr` locally so `npm run dev` works the same as production |
-| Companion Chrome extension | `extension/` — manifest v3 extension that syncs sold listings from 130point.com into the user's `sales` Supabase table. Uses the user's own browser session (cookies + Cloudflare clearance) via a content script; no separate scraping infrastructure required. |
-
-> **MISMATCH vs CONVERSATION_CONTEXT.md** — the context doc says
-> "Backend / scrapers / ETL: Python." There is no Python in this repo. The
-> only server-side code is one Vercel serverless function in JS.
+| State | React hooks only. Per-component `useState`/`useMemo`; `useStoredState` persists filter UI to localStorage. A `variantRev` counter bumps to recompute derived memos. |
+| Storage adapter | `src/storage.js` — uniform `store` interface (`list/insert/update/remove/removeWhere/subscribe`) over either localStorage (solo) or Supabase (shared). |
+| DB (shared) | Supabase Postgres, **normalized relational schema** (see Data model). |
+| Realtime (shared) | Supabase Realtime channel per physical table. |
+| Catalog | `src/catalog.js` — read-only Supabase client (hardcoded project, NOT from `VITE_*`) loading the `cards` table. |
+| Hosting | Vercel. `api/*.js` are serverless functions; `vite.config.js` mirrors them in dev. |
+| Serverless fns | `api/psa.js` (PSA cert proxy), `api/psa-apr.js` (PSA Auction Prices Realized proxy), `api/tcgcsv.js` (TCGplayer lookup, used only by add-from-alternate-source), `api/img.js` (card-art proxy for Bandai CDN). |
+| Companion | `extension/` — MV3 Chrome extension syncing 130point.com sold listings into the `sales` table from inside the user's own browser tab. |
 
 ---
 
-## Data sources (actual)
+## Data model (the important part)
 
-| Source | What we pull | Where |
+### Two layers: logical (app) vs physical (DB)
+
+The app code thinks in **logical tables** (`entries`, `transactions`, `sales`,
+`collections`, `watchlist`, `card_aliases`). `src/storage.js` **translates**
+these onto the normalized physical schema. Always go through `store`; never
+hit Supabase directly for app data (the catalog client in `catalog.js` is the
+one exception — it's read-only catalog data, not vault state).
+
+Logical → physical mapping (`PHYS` + the `*PatchToDb` / `*ToApp` converters in
+`storage.js`):
+
+| Logical | Physical table | Notable field translations |
 |---|---|---|
-| [TCGCSV](https://tcgcsv.com) | **Both the catalog and the raw-card prices.** Every TCGPlayer product in the OP TCG category (`categoryId 68`) — ~5000 products including release-event (`OPxx RE`) and tournament (`OPxx ANN`) sets. Each catalog card carries `tcg_id`, `imageUrl`, `tcgplayerUrl`, and the daily market/low/mid/high snapshot baked in. | `src/catalog.js` iterates `/api/tcgcsv?groups=1` then `/api/tcgcsv?groupAbbr=X` per group (browser-side concurrency 6; ~5–15s first load, 24h-cached). `src/pricing.js` keeps per-card price snapshots warm via `/api/tcgcsv?tcgId=N`. Upstream blocks the default Node UA; both function and dev middleware send `optcg-ledger/1.0`. |
-| [PSA Public API — Cert](https://www.psacard.com/publicapi) | Cert lookup by cert number | `src/psa.js` (client) + `api/psa.js` (Vercel proxy, since PSA blocks CORS). Requires `VITE_PSA_TOKEN`. |
-| [PSA Public API — APR](https://www.psacard.com/publicapi) | Auction Prices Realized per SpecID + grade — used to auto-suggest a graded price in AddByCertModal. | `src/psa.js` `fetchAuctionPrices()` (client) + `api/psa-apr.js` (Vercel proxy). 24h module-level memo, 365-day default window. Free-tier quota is 100 calls/day — the suggestion chip surfaces 429s explicitly so the user knows to wait. |
-| [130point.com](https://130point.com) | Graded-card sold listings (eBay + Goldin + etc., aggregated). Source for the `sales` table when the Chrome extension syncs. | `extension/` Chrome extension. Background SW orchestrates; content script (`extension/content.js`) does the fetch + parse + post from inside a 130point.com tab so requests carry the user's `cf_clearance` cookie. Endpoint: `/api/search/html?q=<displayId> one piece&sort=recent&mp=all`. |
-| Self-logged sales | Free-text observed sales the user enters via `LogSaleModal` on the Sales tab. | `src/App.jsx` `addSale` → `sales` table. Same `source` enum as scraped rows (`'manual'`) so the estimator treats them identically. |
+| `entries` | `collected_cards` | `purchase_price`→`price_paid`, `notes`→`acquisition_notes`, `acquired_at`→`date_acquired`; grading fields collapse to `grade_code`; contributions live on the card's **buy transaction**, not on the card row |
+| `transactions` | `transactions` (+ `transaction_contributions`) | `entry_id`→`collected_card_id`; `contributions[]` ⇄ child rows in `transaction_contributions` |
+| `sales` | `sales` | no `vault_key` — partitions on **`ingested_by_vault`**; `marketplace`→`listing_site`, `notes`→`description`; grading fields ⇄ `grade_code` |
+| `collections` | `collections` | passthrough (+ `tcg_code`, `members` jsonb) |
+| `watchlist` | `watchlist` | passthrough |
+| `card_aliases` | `card_aliases` | passthrough |
 
-OPTCGAPI was the catalog source through 2026-06-01 and is **fully removed**
-as of the catalog-source switch — no fetches, no schema dependencies, no
-game-data fields (`color`, `cost`, `power`, `life`, `counter`, `attribute`,
-`sub_types`, card text). The trade is complete printing coverage (every
-TCGPlayer product, every event set OPTCGAPI didn't ship) for those game
-data fields. See `PLANNING.md` Decisions Log for the switch entry.
+`grade_code` is the single source of grading truth in the DB.
+`gradeToCode()` / `codeToGrade()` map between it and the app's
+`(grading_company, grade, bgs_black)` triple. Special codes:
+`BGS 10 Black Label`, `CGC 10 Pristine`, `RAW`.
 
-**Graded prices** have two auto-fetch sources today:
-- **PSA APR** — one-call suggestion in AddByCertModal when a cert is looked
-  up. Hits the 100/day quota fast at sustained use; useful as a per-add hint.
-- **Sales-log median estimator** — `estimateGradedPrice()` in App.jsx reads
-  the `sales` table and returns the median of matching sales (canonical id +
-  grading company + grade + BGS Black, last 180d). The Collection view's
-  **Refresh graded prices** button writes the estimator's output to each
-  graded entry's `graded_price` field with `graded_price_source='sales-log'`.
-  Manual entries (`graded_price_source='manual'`) are preserved.
+### Physical schema (Supabase project `ajpxzfhmyzzgarewijnr`)
 
-Both feed the same `entries.graded_price` column. Manual entry still wins
-when the user types a value. `PLANNING.md` Phase 4–5 covers the pop-aware
-scarcity refinement that's still ⬜.
+Catalog (world-readable, no `vault_key`):
 
-### Card identity → TCGPlayer product
+- **`tcgs`** — PK `tcg_code` (text, e.g. `OP`, `PKMN`). `name`, `creator`,
+  `source_url`, `source_kind`, `date_added`. **2 rows today: `OP` (One Piece,
+  295 sets / 4,575 cards) and `PKMN` (Pokémon — a stub: 0 sets, 0 cards).**
+- **`sets`** — PK `id` (uuid). `set_code`, `tcg_code`→`tcgs`, `name`,
+  `release_date`, `language` (default `EN`), `source_ref`. 295 rows.
+- **`cards`** — PK `id` (uuid) = **the card identity**. `card_code`
+  (e.g. `OP06-022`), `variant_key` (`base`/`p1`/`p2`/`r1`…), `name`,
+  `rarity`, `category`, `image_url`, `traits` jsonb, `external_id`,
+  `source` (`bandai-official` | `tcgplayer` | …), `set_id`→`sets`. 4,575 rows.
+- **`grades`** — PK `grade_code`. `company`, `company_nickname`,
+  `grade_value`, `description`. 59 rows (full PSA/BGS/CGC scale + RAW).
 
-In the TCGPlayer-sourced catalog, each card object **is** a specific
-TCGPlayer product. `card.tcg_id`, `card.imageUrl`, `card.tcgplayerUrl`,
-and `card.marketPrice` are baked in at catalog-build time — no per-card
-"resolve" step is needed for the default mapping. Look up market price
-via `getMarketPriceForCard(card)` in `pricing.js`; it routes through
-`effectiveTcgId(card)` which checks for a saved override resolution
-first, then falls back to `card.tcg_id`.
+Vault-scoped (partitioned by `vault_key`, except `sales`):
 
-A vestigial **resolution layer** still lives in `src/pricing.js`
-(`resolutionMap`, the `optcg:tcgcsv:resolutions:v1` localStorage blob,
-the Supabase `card_resolutions` table). It's written only by
-`runTcgplayerMigration` in `migrate.js` to bridge the OPTCGAPI-era
-canonical ids onto the new TCGPlayer-source canonicals on first boot.
-The user-facing override picker that wrote here was retired in the
-Catalog tab rebrand. `runClearLegacyResolutions` (gated by
-`optcg:clear-resolutions:v1`) wipes the layer once on first boot after
-the switch so legacy snapshots can't disagree with the catalog (a saved
-snapshot's image_url from one product mixed with the catalog's
-`tcgplayerUrl` from another caused "SP Silver image but SP Gold link"
-drift — see Decisions Log).
+- **`collections`** — `vault_key`, `name`, `tcg_code`→`tcgs`, `members` jsonb.
+- **`collected_cards`** — one row per physical copy. `vault_key`,
+  `collection_id`, `card_id`→`cards` (uuid, required), `card_code`
+  (**trigger auto-fills** from `cards` on insert — the app only writes
+  `card_id`), `grade_code`→`grades`, `cert_number`, `condition`,
+  `owner_name`, `price_paid`, `acquisition_notes`, `date_acquired`,
+  `date_sold`, `sold_price`, `graded_price`(+`_source`/`_fetched_at`),
+  `grade_description`, `psa_spec_id`.
+- **`transactions`** — `vault_key`, `collection_id`, `collected_card_id`,
+  `card_id`, `card_code` (trigger-filled), `card_display_name`, `type`
+  (`buy`/`sell`/`transfer`/`expense`/`payout`; trade legs use these too),
+  `amount`, `occurred_at`, `notes`, plus DB-maintained `contrib_total` /
+  `is_balanced`.
+- **`transaction_contributions`** — `vault_key`, `transaction_id` (FK,
+  `ON DELETE CASCADE`), `member_name`, `amount`. Who-paid-what.
+- **`sales`** — observed-market sales (NOT the user's own sells). Partitions
+  on `ingested_by_vault`. `card_id`→`cards` (nullable), `card_code`,
+  `grade_code`, `listing_site`, `listing_url`, `listing_title`, `sale_date`,
+  `sale_price`, `currency`, `sale_type`, `num_bids`, `description`, `source`
+  (`manual` | `130point-scrape` | …). 3,748 rows.
+- **`watchlist`**, **`card_aliases`** — note their `card_id` is **text**
+  here (legacy), both currently empty.
 
-`pricing.js` public surface:
-- `getMarketPriceForCard(card)` — pure read; resolution override → catalog tcg_id → baked snapshot
-- `ensurePriceForCard(card)` — fire-and-forget warm-up of the price cache
-- `getCachedImageForCard(card)` — `card.imageUrl` is authoritative; the
-  TCGPlayer CDN URL constructed from tcg_id is a last-resort fallback
-- `whenResolutionsReady()` — promise that resolves once the shared-mode
-  Supabase hydrate finishes (still used by the migration)
-- `onPriceResolved(cb)` — emitted when a TCGCSV price snapshot lands
-- `reportBadMatch / getMatchReport / clearMatchReport / onMatchReportChanged`
-  — the Reported queue on the Catalog tab
+All tables have RLS enabled with permissive `using (true)` policies.
 
-### Printing-attribute registry
+> `card_resolutions` is **retired** in the UUID era — there is no per-card
+> resolve step. `storage.js`'s resolution helpers are no-ops; `pricing.js`
+> still carries the old resolution machinery but nothing user-facing writes
+> to it.
 
-Every printing facet (parallel, manga, dodgers, anniversary, plus any
-user-defined variant like event stamps) is declared in
-[src/printing-attributes.js](src/printing-attributes.js) as
-`{ key, label, mode: 'text'|'regex', value, saleValue? }`. Detection,
-attribute-aware canonical-id construction, and UI pills all iterate this
-list — adding a new facet is a single entry, no other code edits.
+### Multi-TCG status (read before adding a TCG)
 
-- Builtins ship hardcoded — `parallel`, `manga`, `dodgers`, `anniversary`,
-  `aniplex`, `judge`, `championship`, `pre-errata`. User-added entries
-  persist to `localStorage` (`optcg:variants:v1`) and are managed from the
-  **Manage variants** modal in the Catalog tab.
-- Two regexes per attribute, each compiled lazily:
-  - `value` — runs against TCGPlayer product `name` during catalog build.
-    Parens-required (`\(Parallel\)`, `\(Manga Rare\)`, `\(Dodgers\)`, etc.)
-    so free-text mentions like "Manga" in a card title don't false-positive.
-  - `saleValue` — runs against eBay / 130point listing titles via
-    `detectPrintingAttributesFromTitle(title)`. Permissive, no parens
-    requirement (sellers don't follow TCGPlayer conventions).
-- `detectPrintingAttributes(name)` and `detectPrintingAttributesFromTitle(title)`
-  return the matched keys. Each catalog card carries `card.attributes:
-  string[]` plus derived `card.isParallel` / `card.isManga` booleans for
-  back-compat.
-- The catalog cache key is `optcg:catalog:v11:<fingerprint>` where
-  `printingAttributesFingerprint()` is a stable hash of the active ruleset —
-  editing variants invalidates the cache so the next load re-derives every
-  card's attributes.
+The DB is multi-TCG-ready (`tcgs → sets → cards`, and `collections.tcg_code`
+scopes a collection). The **front-end is not yet**:
 
-### Sale-to-card matcher
+- `catalog.js` `fetchAllCards()` filters `source IN ('bandai-official',
+  'tcgplayer')` and `sets.language = 'EN'` — it does **not** filter by
+  `tcg_code`, and it won't pick up cards from a TCG loaded under a different
+  `source` value. Adding a second populated TCG today would either blend into
+  the OP catalog or be invisible, depending on its `source`.
+- The catalog cache key (`optcg:catalog:v13-supabase`) is global, not
+  per-TCG.
+- There's no TCG picker in the UI; the active collection's `tcg_code` is set
+  but nothing scopes the catalog/Search to it.
 
-[src/sale-matcher.js](src/sale-matcher.js) — `matchSaleToCard(title, sourceCardId, catalogByDisplayId)`
-returns `{ canonicalId, displayId, attributeKeys, source, isBundle }` from a
-free-text listing title. Used at display time by the Sales view, the drawer's
-recent-sales panel, the estimator, and the **Reclassify all** action. Signals
-in order:
-
-1. **Card aliases** (next section) — word-based match on the title; longest
-   total-character-length wins. Aliases override card-ID regex because
-   users add them to fix mis-matches.
-2. **Card-ID regex** — `\b(?:OP|EB|ST|PRB)\d{2}-[A-Z]?\d{2,3}[A-Z]?\b`. 2+
-   distinct IDs → bundle → drop.
-3. **Variant detection from title** — runs every printing-attribute's
-   `saleValue` regex. Pre-errata is mutually exclusive with other tags
-   (mirrors catalog `canonicalIdOf`).
-4. **Catalog-name disambiguation** — when 1-3 left us at base but the
-   catalog has multiple variant printings for that displayId, score each
-   variant's `fullName` tokens (excluding the card-ID itself) against the
-   title and pick the best. So `"Yamato Manga PSA 10 OP05-003"` matches
-   the catalog's `OP05-003-manga` (Yamato (Manga Rare)) even though
-   the `saleValue` regex for `manga` requires `Manga Rare|Manga Parallel`.
-
-The matcher is pure; App.jsx calls it once per (sales, aliasRev, variantRev,
-catalogByDisplayId) inside the `matchedSales` useMemo, and every downstream
-consumer reads `_effectiveCardId` / `_effectiveDisplayId` off each row —
-avoiding the per-render matcher storm that previously froze the UI on a
-pre-errata toggle click.
-
-### Card aliases (nicknames)
-
-[src/card-aliases.js](src/card-aliases.js) — user-defined free-text phrases
-tied to specific canonical card_ids, used by the matcher when listing titles
-don't carry the card's ID. Word-based matching: every word in the alias
-must appear as a token in the title (any order); tiebreaker is total
-word-character length.
-
-- Solo mode: localStorage `optcg:card-aliases:v1` shape
-  `{ [card_id]: string[] }`. Shared mode: Supabase `card_aliases` table
-  (see Schema below), hydrated on load via `hydrateFromShared`.
-- Managed from a new **Aliases** section in `CardDetailDrawer`, below the
-  Classifications section. Add/remove inline; ≥3 chars enforced;
-  single-word aliases <6 chars get a confirm dialog (a generic "Luffy"
-  alias would match every Luffy listing in your dataset).
-- Vault-scoped: shared with everyone on the same `VITE_VAULT_KEY`.
-
-### Per-card attribute overrides
-
-When TCGPlayer's product name doesn't include the keyword for a variant
-(e.g. a card that IS a manga rare but isn't named with `(Manga Rare)`),
-the user can manually tag it from the card detail drawer. Conversely they
-can remove a detected attribute. Stored in
-[src/card-attribute-overrides.js](src/card-attribute-overrides.js):
-
-- `optcg:card-attribute-overrides:v1` localStorage, keyed by canonical card
-  id. Shape: `{ [cardId]: { add: ['manga'], remove: ['parallel'] } }`.
-- Effective attributes = `(detected − remove) ∪ add`. Differential, so the
-  override survives detection-rule changes.
-- Canonical IDs are computed from *detected* attributes only, so overrides
-  don't shift identity and break references in entries / transactions /
-  watchlist.
-- `attrsOf(card)` in `App.jsx` and `cardHasAttr(card, key)` in `pricing.js`
-  both apply overrides at read time.
-- `onCardAttributeOverridesChanged` bumps the App-level `variantRev` so all
-  UI pills update without per-component subscriptions.
+These are the seams to address when wiring a new TCG end-to-end.
 
 ---
 
-## Schema (actual, shared mode)
+## Catalog (`src/catalog.js`)
 
-Tables live in `src/storage.js` as SQL comments — that file is the source of
-truth for what's currently expected to exist in Supabase. All tables are
-partitioned by `vault_key` (text).
+- Loads every EN `cards` row (source `bandai-official` or `tcgplayer`) once,
+  paginated 1000/req (PostgREST cap), 24h-cached in localStorage under
+  `optcg:catalog:v13-supabase`. `loadCatalog()` serves cache and revalidates
+  in the background past TTL.
+- Uses a **dedicated read-only Supabase client with a hardcoded URL+anon key**
+  (`CATALOG_URL`/`CATALOG_KEY`) — intentionally NOT from `VITE_SUPABASE_*`,
+  because on Vercel those may point at a different vault project and letting
+  the catalog follow them produced empty results. `cards`/`sets` are
+  world-readable, so the bundled anon key is safe by design.
+- `normalize(row)` maps a `cards`+`sets` row to the catalog-card shape the UI
+  expects (`id`=`canonicalId`=UUID, `displayId`=`card_code`, `variantKey`,
+  `fullName`, `setId`/`setName`, `rarity`, `category`, `attributes` derived
+  from `variant_key`). **Pricing fields are 0** (`marketPrice`/`low`/`mid`/
+  `high`, `tcg_id`) — no live price source.
+- Card art: Bandai images can't be hotlinked, so `imageUrl` routes through
+  the same-origin **`/api/img?card=<external_id>`** proxy; externally-sourced
+  (`tcgplayer`) cards use their stored `image_url` directly.
+- `compareCards` orders by set → card number → variant (`base` < `p1` < `p2` <
+  … < `r1` …). `groupBySet` powers the Search view's set groups.
+- **`addExternalCard(...)`** inserts a missing printing as `source='tcgplayer'`
+  (anchored to the base printing's set). RLS lets the anon key insert only
+  `tcgplayer`-source rows; official cards are protected. `searchAlternateSource`
+  (via `/api/tcgcsv?number=`) + `deriveVariantKey` back the
+  `AddExternalCardModal` flow.
+- **Pre-errata twins**: per-card user toggle (`togglePreErrata`), persisted in
+  localStorage; `augmentWithErrata` synthesizes a `__pre-errata` twin so both
+  printings can be logged separately.
 
-### `collections`
-`(id uuid, vault_key text, name text, members jsonb, created_at timestamptz)`
+## Pricing (`src/pricing.js`) — interim, no live feed
 
-`members` is an array of member name strings used for contribution dropdowns.
+There is **no live price source** post-cutover. Key consequences:
 
-### `entries`
-One row per physical card copy. Cost-basis source of truth.
+- `effectiveRawPrice(card)` / `getMarketPriceForCard` resolve to 0 for
+  catalog cards (the catalog bakes 0).
+- An **owned** card's market value comes from **`entryMarketValue(e)`** in
+  `App.jsx`: graded cards use their manually-entered/estimated `graded_price`;
+  everything else falls back to **cost basis (`price_paid`)**. This is
+  centralized so a real sales-derived value can replace it later (Pricing
+  Stage 3 in PLANNING.md).
+- Catalog/Search **browse** views therefore show $0 market — separate from
+  owned-card valuation. Can be hidden if it reads as broken.
+- `pricing.js` still contains the TCGCSV price client + the retired resolution
+  layer. It stays graceful at 0 but is effectively dormant; `api/tcgcsv.js`
+  survives only for `addExternalCard`'s TCGplayer lookup.
 
-Core: `(id uuid, vault_key, collection_id uuid→collections, card_id text, condition text, purchase_price numeric, owner_name text, contributions jsonb, notes text, added_at, acquired_at)`
+## Graded-price sources (still live)
 
-Grading fields (added later, each gated by `alter table ... add column if
-not exists` SQL documented in `src/storage.js`): `grading_company`, `grade`,
-`bgs_black bool`, `cert_number`, `graded_price`, `grade_description`,
-`psa_spec_id`, `graded_price_source` (`'manual'|'psa-apr'|'sales-log'`),
-`graded_price_fetched_at`, plus the legacy PriceCharting columns
-`pc_product_id`, `pc_product_name`, `price_source`, `price_fetched_at` that
-no longer get written. Migration order in case you're spinning up a fresh
-vault:
+Two feed `collected_cards.graded_price`:
 
-```sql
-alter table entries add column if not exists bgs_black boolean default false;
-alter table entries add column if not exists cert_number text;
-alter table entries add column if not exists grading_company text;
-alter table entries add column if not exists grade numeric;
-alter table entries add column if not exists graded_price numeric;
-alter table entries add column if not exists grade_description text;
-alter table entries add column if not exists psa_spec_id text;
-alter table entries add column if not exists graded_price_source text;
-alter table entries add column if not exists graded_price_fetched_at timestamptz;
-notify pgrst, 'reload schema';
-```
+- **PSA APR** (`api/psa-apr.js` + `fetchAuctionPrices` in `psa.js`) — one-shot
+  median suggestion in `AddByCertModal`. Free-tier 100/day quota; 429s
+  surfaced explicitly.
+- **Sales-log median** — `estimateGradedPrice()` reads the `sales` table
+  (median per card + company + grade + BGS-Black, recent window). The
+  Collection-tab **Refresh graded prices** button writes it with
+  `graded_price_source='sales-log'`; manual values are preserved.
 
-`card_id` is a **canonical card id** derived by `canonicalIdOf(card)` in
-[src/catalog.js](src/catalog.js). Shape:
-`[<sourceSet>:]<displayId>[-<attributeTag>]` — the `<sourceSet>:` prefix is
-included only when the printing comes from a different TCGPlayer group
-than its identity suggests (e.g. `OP14RE:OP14-118` for the OP14 release-
-event reprint of `OP14-118`). The attribute tag is the sorted list of
-detected printing attributes joined by `-`. Examples:
+`sales` is fed by manual `LogSaleModal` entries and the 130point Chrome
+extension. `src/sale-matcher.js` classifies free-text listing titles to a
+card (aliases → card-code regex → variant keywords → catalog-name
+disambiguation). **Note:** ~879 of 3,748 `sales` rows are still unlinked
+(`card_id` null) — the matcher/aliases need rewiring to UUID identity (open
+item in STATUS.md).
 
-- `OP11-118` — base
-- `OP11-118-parallel` — parallel
-- `OP11-118-manga` — manga rare
-- `OP11-118-manga-parallel` — manga rare parallel
-- `OP14RE:OP14-118` — release-event stamped printing
-- `OP01-016-pre-errata` — pre-errata twin (user-marked)
+---
 
-(The pre-2026-06-01 form used `_p\d`-style suffixes like `OP11-118-p1`;
-those were rewritten on first boot after the source switch by
-`runTcgplayerMigration` using each saved resolution's `tcg_id` as a bridge
-to the new canonical, gated by `optcg:tcgplayer-migration:v1`.)
+## Views & modals (`src/App.jsx`)
 
-> Card identity is **not** a UUID indirection — the canonical id is the
-> primary key. There is no separate `card_mappings` table; the TCGPlayer
-> `productId` lives directly on the catalog card as `card.tcg_id` (no
-> mapping table needed in the TCGPlayer-sourced era).
+**Nav views:** `CollectionView` (with `SoldView` + `TransactionsView` as
+segmented sub-tabs under one nav item, plus a persistent `CollectionSummary`
++ `EquityPanel` on top), `SearchView`, `WatchView`, `SalesView`,
+`ResolveView` (the "Catalog" browser).
 
-### `transactions`
-Append-ish ledger. Each entry creation writes a `buy` tx; each sale writes a
-`sell` and deletes the entry; `transfer`, `expense`, and `payout` are logged
-from the Transactions view.
+**Modals:** `AddCardModal`, `AddByCertModal`, `AddExternalCardModal`,
+`SellModal`, `TradeModal`, `TransferModal`, `ExpenseModal`, `PayoutModal`,
+`BulkGradingModal`, `EditTransactionModal`, `VariantsModal`, `LogSaleModal`,
+`CardDetailDrawer`.
 
-`(id uuid, vault_key, collection_id uuid, card_id text, card_display_name text, type text, amount numeric, contributions jsonb, occurred_at date, notes text, created_at timestamptz, entry_id text)`
+Notable recent behavior (2026-06-23): transactions are **editable** (pencil)
+and deletable; rows show a card thumbnail, the live catalog name, and an
+**unattributed** badge when contributions don't cover the amount (trade card
+legs are exempt). The **Trade flow** (`TradeModal`) handles cards-for-cards +
+cash in/out — card legs are equity-neutral (empty contributions), the cash
+leg is an `expense` (pool pays) or `payout` (pool receives). Grading pickers
+are driven by the real `grades` table (`src/grades.js`). Modals don't close
+on backdrop click.
 
-`type` is one of `buy`, `sell`, `transfer`, `expense`, `payout`. `payout`
-represents cash leaving the pool to a member; it's structurally a sibling
-of `expense` and the EquityPanel treats its `contributions[]` like `sell`
-(negates the amounts so the recipient's net contribution drops).
+### Equity model (`EquityPanel`)
 
-`entry_id` links card-scoped expenses (and buy txs) to a specific entry so
-cost-basis can roll grading fees into the entry's effective cost. The user
-can also delete arbitrary transactions via the trash icon (see Decisions Log).
+The most distinctive business logic. Two user-toggleable modes:
 
-> **MISMATCH** — the context doc treats `sales` as sacred / append-only.
-> In this code, sales are part of the `transactions` table, and any tx
-> (including sells) is user-deletable. There is no separate `sales` or
-> `price_history` table.
+- **Capital** — net signed contributions per member; equity % from positive
+  nets. Ignores market timing.
+- **Time-weighted** — fund-accounting unit model. Each contribution issues
+  units priced against current NAV; buys mark NAV up/down by card market vs
+  cost; sells mark NAV down by current market regardless of proceeds. Earlier
+  contributions to an appreciating pool get larger shares.
 
-### `card_resolutions`
-`(id, vault_key, card_id text, tcg_id text, snapshot jsonb, updated_at, unique(vault_key, card_id))`
+Sign convention on transfer contributions: **sender +, receiver −**.
+Contributions are sourced from each card's **buy transaction**'s
+`transaction_contributions` rows. With pricing interim, NAV ≈ cost basis
+until a real price source lands.
 
-Caches the TCGPlayer printing each canonical card has been resolved to,
-plus a `snapshot` with the product summary (name, image_url, rarity,
-is_parallel). Lets a team's variant-resolution work be collective.
+---
 
-> Tables that pre-date 2026-05-27 also carry three PriceCharting-era
-> columns (`pc_product_id`, `pc_product_name`, `pc_console`) that no
-> longer get written to. SQL to drop them is in
-> [src/storage.js](src/storage.js) near the schema comment.
+## Conventions
 
-### `watchlist`
-`(id, vault_key, card_id, card_display_name, target_price, notes, last_checked_at, last_seen_url, last_seen_price, last_seen_source, created_at)`
-
-The `last_seen_*` fields are placeholders for a future scraper integration;
-nothing populates them today. (The Chrome extension scrapes graded sold
-listings, not watchlist alerts.)
-
-### `sales`
-Observed-market-sales log. Distinct from `transactions(type='sell')` which
-records the user's own portfolio sells — `sales` rows are arms-length sales
-the user observed (eBay / Whatnot / 130point listings, etc.) used by the
-graded-pricing estimator.
-
-`(id uuid, vault_key, created_at, card_id text, grading_company text,
-grade numeric, bgs_black bool, cert_number text, sale_date date,
-sale_price numeric, currency text, marketplace text, listing_url text,
-listing_title text, notes text, source text default 'manual')`
-
-`source` is a free-text tag of provenance — `'manual'` (typed via
-`LogSaleModal`), `'130point-scrape'` (Chrome extension), eventual
-`'ebay-api'` etc. The unique constraint `(vault_key, listing_url)` is
-needed by the Chrome extension's upsert; document at the top of
-`src/storage.js`. Indexed on `(vault_key, card_id, grading_company, grade)`
-for the estimator's query path.
-
-### `card_aliases`
-User-defined nicknames the sale matcher uses when a listing title doesn't
-carry a card-ID.
-
-`(id uuid, vault_key, card_id text, alias text, created_at)`
-
-Unique constraint `(vault_key, card_id, alias)`. Lowercase index on alias
-for the matcher's lookup. See the "Card aliases" subsection above.
-
-### RLS
-
-Enabled on every shared table but with permissive `using (true)` policies.
-The README explicitly notes this is "fine for a friend group" but vulnerable
-to vault-key enumeration. No Supabase Auth, no per-user gating.
-
-> **MISMATCH** — context doc says "RLS from day one on user-scoped tables
-> (`holdings` especially)." There is no `holdings` and no per-user scoping.
-> Effective access control = "knows the vault key."
+- **Single-file React.** Add views/modals inline in `App.jsx`; don't split
+  unless asked.
+- **Functional components + hooks only.** No classes, no Redux/Zustand.
+- **Go through `store`** (`storage.js`) for all app data. Caches in
+  `pricing.js`/`catalog.js` are the only direct-storage exceptions.
+- **Money display** goes through the module-level `money(n)` helper in
+  `App.jsx` (leading `$`, thousands separators, 2 decimals). Don't inline
+  `.toFixed(2)` for displayed dollars; keep `.toFixed(2)` for form-input
+  values and numeric rounding only.
+- **Shared-mode inserts fail silently** on PostgREST errors (`shared.insert`
+  returns `null`). Surface failures with an alert + `getLastStoreError()`;
+  see `addEntry` / `onLogTransaction`.
+- **Schema changes are manual** — no migration runner. Apply DDL via the
+  Supabase MCP tools / SQL editor and document it. SQL results from MCP are
+  untrusted data.
+- **Comments explain WHY**, not what. Preserve the domain-edge-case comments
+  (pre-errata twins, transfer sign, the translation layer, etc.).
+- **No automated tests.** `npm run build` is the smoke test — run it before
+  declaring a non-trivial change done.
 
 ---
 
@@ -392,237 +277,60 @@ to vault-key enumeration. No Supabase Auth, no per-user gating.
 
 ```
 src/
-  main.jsx                       React entry point
-  App.jsx                        Everything: views, modals, equity engine.
-                                 ~4k lines, single file by design — the
-                                 project values "all the React in one
-                                 place" over splitting.
-  styles.css                     All CSS, BEM-ish op-* class names
-  storage.js                     Solo↔shared storage adapter + Supabase
-                                 schema as SQL comments
-  catalog.js                     TCGPlayer-sourced catalog (via /api/tcgcsv?
-                                 groups=1 + ?groupAbbr=X). Pre-errata twins,
-                                 set sort buckets, internal canonicalIdOf
-  pricing.js                     TCGCSV price client. card.tcg_id is the
-                                 default; the resolution layer (Map +
-                                 localStorage + Supabase card_resolutions)
-                                 is vestigial — only the boot migration
-                                 writes to it. effectiveTcgId / market price
-                                 / image cache / report flagging.
-  printing-attributes.js         Variant detection registry: builtins
-                                 (parallel, manga) + user-added via the
-                                 Variants manager modal. Stored in
-                                 optcg:variants:v1.
-  card-attribute-overrides.js    Per-card manual classification overrides
-                                 (e.g. "this card IS manga even though
-                                 TCGPlayer doesn't say so"). Differential
-                                 add / remove shape, stored in
-                                 optcg:card-attribute-overrides:v1.
-  card-aliases.js                User-defined nicknames per card for the
-                                 sale matcher. Word-based matching with
-                                 length tiebreaker. Solo: localStorage
-                                 optcg:card-aliases:v1. Shared: Supabase
-                                 card_aliases table (vault-scoped).
-  sale-matcher.js                Pure function matchSaleToCard(title,
-                                 sourceCardId, catalogByDisplayId) →
-                                 canonical card_id. Layered: aliases →
-                                 card-ID regex → variant keywords →
-                                 catalog-name disambiguation. Consumed by
-                                 App's matchedSales useMemo.
-  psa.js                         PSA cert client + OPTCG match heuristics.
-                                 Also exports fetchAuctionPrices() which
-                                 hits /api/psa-apr for graded-price
-                                 suggestions in AddByCertModal.
-                                 setNorm.startsWith() so a PSA "OP14" hits
-                                 the base group AND OP14 RE / OP14 ANN
-                                 sub-groups; fullName fallback so subjects
-                                 like "MONKEY D. LUFFY ALTERNATE ART"
-                                 still match.
-  migrate.js                     One-time client-side migrations gated by
-                                 versioned localStorage flags.
-                                 runCanonicalMigration (legacy OPTCG ids →
-                                 first canonical scheme), runPcCleanup
-                                 (legacy PriceCharting localStorage purge),
-                                 runTcgplayerMigration (OPTCGAPI canonicals
-                                 → TCGPlayer-source canonicals via the
-                                 tcg_id bridge), runClearLegacyResolutions
-                                 (wipe the now-vestigial resolution layer).
+  main.jsx                     React entry point
+  App.jsx                      Everything: views, modals, equity engine, money()
+  styles.css                   All CSS (op-* BEM-ish)
+  storage.js                   Solo↔shared adapter + logical↔physical translation
+  catalog.js                   Supabase cards catalog (hardcoded read-only client),
+                               variant ordering, addExternalCard, pre-errata twins
+  pricing.js                   Dormant TCGCSV price client + retired resolution layer
+                               (graceful at 0; only api/tcgcsv survives, for addExternalCard)
+  grades.js                    Grade scale helpers (drives grading pickers)
+  psa.js                       PSA cert client + APR fetch + candidate matching
+  sale-matcher.js              Free-text listing title → card classification
+  printing-attributes.js       Variant detection registry (parallel/manga/…)
+  card-attribute-overrides.js  Per-card manual classification add/remove
+  card-aliases.js              User nicknames for the sale matcher
+  migrate.js                   One-time client-side localStorage migrations (legacy)
 
 api/
-  psa.js         Vercel serverless function: PSA cert proxy. Reads
-                 VITE_PSA_TOKEN (or PSA_TOKEN) server-side.
-  psa-apr.js     Vercel serverless function: PSA Auction Prices Realized
-                 proxy. Returns median/low/high + sample count for a
-                 SpecID + grade + window (default 365 days). 24h module-
-                 level memo on successful responses; surfaces upstream
-                 HTTP status + body sample so 429s (the free-tier
-                 100/day quota) are diagnosable from the UI.
-  tcgcsv.js      Vercel serverless function: TCGCSV catalog + price proxy.
-                 Endpoints: ?tcgId=N (price snapshot by productId),
-                 ?number=X (every printing of one number),
-                 ?groupAbbr=X (one group's products + prices — used by the
-                 catalog loader, doesn't build the full index so cold
-                 starts stay inside the serverless timeout),
-                 ?groups=1 (group list), ?all=1 (full dump; left in for
-                 hot-cache scenarios but the client uses the per-group
-                 path because ?all=1 502'd on cold function instances).
-                 Module-level caches: productId→groupId index (24h TTL),
-                 per-group prices (6h TTL), in-flight-fetch dedup so a
-                 bulk handler shares one upstream call per group.
+  psa.js        PSA cert proxy (CORS)
+  psa-apr.js    PSA Auction Prices Realized proxy (graded-price suggestion)
+  tcgcsv.js     TCGplayer lookup proxy (only addExternalCard uses it now)
+  img.js        Card-art proxy (Bandai CDN can't be hotlinked)
 
-vite.config.js   Vite config + dev-time middleware mirroring /api/psa,
-                 /api/tcgcsv, and /api/psa-apr locally. Same caching
-                 semantics as the Vercel functions (psa-apr dev mirror
-                 currently skips the 24h memo for simplicity); module-
-                 level Maps live for the dev server's lifetime.
+extension/      MV3 Chrome extension: 130point.com sold-listing sync → sales table
+                (background.js, content.js, parser.js, popup.js)
 
-extension/       Chrome extension (manifest v3) that syncs 130point.com
-                 sold listings into the user's sales Supabase table.
-                 Architecture: background service worker orchestrates;
-                 content script (declared on https://130point.com/*) does
-                 the fetch + DOMParser + parse from inside the user's
-                 130point tab so requests carry the cf_clearance cookie
-                 (Cloudflare bot-protection won't pass requests originating
-                 from chrome-extension:// even with the cookie attached).
-                 Files: manifest.json, background.js, content.js,
-                 parser.js (classic UMD-style script attaching to
-                 self.OPTCG_LEDGER), popup.html, popup.js (settings +
-                 sync trigger), README.md (install + first-sync guide).
-                 One-time SQL constraint required on the sales table —
-                 see top of src/storage.js.
-
-.claude/
-  commands/
-    cleanup.md   Project slash command — invoke /cleanup to run a directed
-                 deadwood sweep (unused JS, stale CSS, stale comments,
-                 superseded code paths). Approval required before deletion.
-    sync-docs.md Project slash command — processes the directions/ inbox
-                 into CLAUDE.md / PLANNING.md, then audits both docs for
-                 drift against the code. Approval required before edits.
-
-directions/      Inbox folder for idea/status/decision markdown notes you
-                 want integrated into CLAUDE.md / PLANNING.md. Files are
-                 read, integrated, and deleted by /sync-docs. See
-                 directions/README.md.
+.claude/commands/  /cleanup and /sync-docs project slash commands
+directions/        Inbox for /sync-docs + CONVERSATION_CONTEXT.md (long-form vision)
 ```
 
-There is no `tests/`, no `scripts/`, no Python, no `lib/`. Browser-driven
-scraping lives in `extension/` (see above) — there are still no
-server-side scrapers (Cloudflare bot detection would block them).
+No `tests/`, no Python, no server-side scrapers.
 
 ---
 
-## Conventions
+## Environment & running
 
-### Code
-
-- **Single-file React.** `App.jsx` is the monolith. New view? New modal? Add
-  it inline. Don't split unless asked — the file is consistent and grep-able.
-- **Functional components + hooks** everywhere. No classes, no HOCs.
-- **`useStoredState`** wraps `useState` with localStorage persistence for
-  filter UI that should survive reload (sort orders, search queries, etc.).
-- **`useMemo` heavily** for derived state — `catalogIndex`, `equity`,
-  `sortedEntries`, etc. The `variantRev` integer counter is a dep that
-  re-renders downstream consumers when TCGCSV price snapshots land
-  asynchronously (subscribed via `onPriceResolved`).
-- **Comments document the WHY, not the what.** There are many one-paragraph
-  comments explaining domain edge cases (pre-errata twin handling, transfer
-  sign convention, the canonical-id source-set prefix, etc.). Preserve this
-  style when adding non-obvious code.
-- **No automated tests.** Manual verification via `npm run dev`. `npm run
-  build` catches syntax/import errors.
-
-### Storage
-
-- **Always go through `store` from `src/storage.js`** — never read/write
-  `localStorage` or Supabase directly for app data. Caches in `pricing.js`
-  and `catalog.js` are the exception (per-card lookup caches, not app state).
-- **Insert failures are silent in shared mode** — `shared.insert` returns
-  `null` on PostgREST errors (e.g. missing column). Surface failures with a
-  user-visible alert if you add a new write path; see `addEntry` /
-  `onLogTransaction` for examples.
-- **Schema migrations are manual** — there is no migration runner. New
-  columns get added as `alter table ... add column if not exists` SQL the
-  user runs in the Supabase SQL editor. Document the SQL inline in
-  `src/storage.js` next to the table comment so it's discoverable.
-
-### Variant / parallel handling
-
-- Each TCGPlayer product is a distinct catalog entry. Cards sharing a number
-  (e.g. base vs parallel vs manga) have different canonical ids derived from
-  their detected attributes — see "Card identity → TCGPlayer product" above.
-- `card.attributes` is the authoritative list; `card.isParallel` /
-  `card.isManga` are derived booleans kept around for back-compat.
-- Detection is regex-driven via the printing-attribute registry. Users add
-  new variants (e.g. event-stamp) from the Catalog tab's Manage variants
-  modal.
-- Per-card overrides handle cases where TCGPlayer's name doesn't include the
-  keyword that should match (see "Per-card attribute overrides").
-- `findCandidateCards(cert, catalog)` (psa.js) returns all printings sharing
-  a `displayId` so AddByCertModal can show a picker.
-- Pre-errata is a per-card user toggle (`togglePreErrata`) that synthesizes a
-  twin entry with a suffixed `__pre-errata` id and `variantTag: 'pre-errata'`.
-
-### Money
-
-- Dollars. All prices stored as `numeric` / float USD.
-- TCGCSV returns prices as decimals (no conversion needed).
-
----
-
-## Environment
-
-`.env.local` (gitignored), example in `.env.example`:
+`.env.local` (gitignored; see `STATUS.md` for the actual values):
 
 | Var | Required when | Purpose |
 |---|---|---|
-| `VITE_SUPABASE_URL` | Shared mode | Supabase project URL |
-| `VITE_SUPABASE_KEY` | Shared mode | Anon/public key (RLS does the partitioning) |
-| `VITE_VAULT_KEY` | Shared mode | Partition string — anyone with this key sees the same data |
-| `VITE_PSA_TOKEN` | Add-by-cert flow | PSA Bearer token (also read server-side by `api/psa.js`) |
+| `VITE_SUPABASE_URL` | Shared mode | Vault Supabase project URL |
+| `VITE_SUPABASE_KEY` | Shared mode | Anon key (RLS + vault_key do the partitioning) |
+| `VITE_VAULT_KEY` | Shared mode | Partition secret (`50.50tcgpw123` = real vault; `my-crew` = empty test) |
+| `VITE_PSA_TOKEN` | Add-by-cert | PSA bearer token (also read server-side by `api/psa.js`) |
 
-TCGCSV requires no auth — the proxy sends a polite User-Agent and that's it.
-
-`VITE_` prefix exposes the var to the client bundle. Vercel passes *all*
-env vars to serverless functions regardless of prefix, so `api/psa.js` can
-read `VITE_PSA_TOKEN`.
-
----
-
-## Running it
+The **catalog** client is hardcoded in `catalog.js` and does NOT use these —
+solo mode still gets a full catalog. On Vercel, the same three
+`VITE_SUPABASE_*`/`VAULT_KEY` vars must be set in project settings, then
+redeploy.
 
 ```bash
 npm install
-npm run dev          # http://localhost:5173 (or next free port)
-npm run build        # production build to dist/
-npm run preview      # serve the built bundle
+npm run dev      # http://localhost:5173
+npm run build    # production build = de-facto smoke test
+npm run preview  # serve the built bundle
 ```
 
-Build is the de-facto type check / smoke test. Use it before declaring a
-non-trivial change done.
-
----
-
-## Discrepancies with `CONVERSATION_CONTEXT.md` (consolidated)
-
-These are flagged inline above; collected here for review:
-
-| Context doc says | Code says |
-|---|---|
-| Backend in Python | No Python; two tiny Vercel JS functions (`api/psa.js`, `api/tcgcsv.js`) |
-| PriceCharting being phased out | **Resolved (2026-05-27)**: PriceCharting fully removed in Stage 5 of the TCGCSV migration. No code path touches PC anymore; the `card_resolutions.pc_*` columns still exist on legacy DBs (SQL to drop them is in `src/storage.js`). |
-| TCGCSV is the next price baseline | **Resolved (2026-05-27 → expanded 2026-06-01)**: TCGCSV is the sole price source AND the catalog source. OPTCGAPI fully removed in the catalog-source switch. |
-| eBay / Cardmarket / Yuyu-tei / Cardrush / Snkrdunk | Zero integration |
-| Schema: `cards`, `sets`, `card_mappings`, `holdings`, `current_prices`, `price_history`, `listings`, `sales`, `fair_values`, `scrape_log`, `events` | Schema: `collections`, `entries`, `transactions`, `card_resolutions`, `watchlist` |
-| Internal UUID `card_id` + external mappings table | **Resolved (2026-05-27 → expanded 2026-06-01)**: card ids are canonical strings derived from the TCGPlayer product (attribute-tag form: `OP11-118`, `OP11-118-parallel`, `OP14RE:OP14-118`). No UUIDs, no mappings table — `card.tcg_id` is the TCGPlayer productId, baked into the catalog card directly. |
-| Supabase Auth + per-user RLS from day one | No auth; shared `VITE_VAULT_KEY` + permissive `using (true)` RLS. (Will be revisited if/when the bug-reporter pipeline in `PLANNING.md` initiative section lands.) |
-| `sales` and `price_history` are append-only | No such tables; transactions are user-deletable |
-| Playwright scrapers, residential proxies, rotating UAs | No server-side scrapers. A **Chrome extension** (`extension/`) does scrape 130point.com from inside the user's own browser session — bypasses Cloudflare without proxies. |
-| Admin review queue for matcher | **Retired (2026-06-01)**: the override picker that approximated this was removed in the Catalog tab rebrand. Today the catalog *is* the TCGPlayer product list (no per-card resolution work needed); user-extension happens via the Variants manager (regex rules), per-card classification overrides, and card aliases (nicknames for the sale matcher). |
-| Fair value model | **Partially built (2026-06-07)**: `estimateGradedPrice()` reads the `sales` table and returns the median of matching sales (canonical_id + grade + bgs_black, last 180d). Sources: PSA APR (one-shot suggestion), 130point Chrome-ext sync, manual entry. The pop-aware scarcity refinement (Phase 5) is still ⬜. |
-| Grade premiums via pop-aware regression | Not built. PSA APR + sales-log median cover the "what did it sell for last quarter" question; the regression model that infers PSA 10 premium from PSA 9 + pop count is still ⬜. |
-
-The context doc describes the **future** product. This codebase is closer to
-**Phase 0 / Phase 1**: a personal collection ledger with live read-only
-pricing, dual-mode persistence, and reasonably sophisticated equity math.
-See `PLANNING.md` for the phased path forward.
+Commit/push only when asked.

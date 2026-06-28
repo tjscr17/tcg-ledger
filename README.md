@@ -23,6 +23,14 @@ Open http://localhost:5173. That's it. You can deploy this as-is and use it your
 
 ## Going shared — full setup (15 minutes)
 
+> ⚠️ **Schema note (2026-06-28):** the shared-mode SQL below is the **original
+> flat schema and is now out of date.** As of the 2026-06-22/23 cutover the app
+> runs on a **normalized schema** (`tcgs → sets → cards` with UUID card identity;
+> vault tables `collected_cards` / `transactions` / `transaction_contributions` /
+> `sales`). See **`CLAUDE.md` → "Data model"** for the current schema and
+> **`STATUS.md`** for the live project's connection details. This generic
+> self-host guide hasn't been re-derived for the normalized schema yet.
+
 ### Step 1: Set up Supabase (free)
 
 1. Go to [supabase.com](https://supabase.com) and create a free account.
