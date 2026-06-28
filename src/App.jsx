@@ -28,6 +28,12 @@ import {
   onCardAttributeOverridesChanged,
 } from './card-attribute-overrides.js';
 
+// Format a USD amount for display: leading "$", thousands separators, and a
+// fixed 2 decimals (1800 → "$1,800.00"). Module-level so every view shares one
+// formatter. Call sites pass the bare number — the "$" lives here, not inline.
+const money = (n) =>
+  `$${(Number(n) || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
 // Effective attribute keys for a card / product / resolution snapshot.
 // For catalog cards (with `canonicalId`), per-card manual overrides apply on
 // top of the detected set. For products / resolution snapshots, just use
@@ -1469,13 +1475,13 @@ function CollectionView({ collection, entries, transactions = [], catalogIndex, 
       <div className="op-stats">
         <Stat
           label="Paid In"
-          value={`$${stats.totalPaid.toFixed(2)}`}
-          sub={stats.totalExpenses > 0 ? `+ $${stats.totalExpenses.toFixed(2)} expenses` : null}
+          value={`${money(stats.totalPaid)}`}
+          sub={stats.totalExpenses > 0 ? `+ ${money(stats.totalExpenses)} expenses` : null}
         />
-        <Stat label="Market Value" value={`$${stats.totalMarket.toFixed(2)}`} accent />
+        <Stat label="Market Value" value={`${money(stats.totalMarket)}`} accent />
         <Stat
           label={profit >= 0 ? 'Unrealized Gain' : 'Unrealized Loss'}
-          value={`${profit >= 0 ? '+' : ''}$${profit.toFixed(2)}`}
+          value={`${profit >= 0 ? '+' : ''}${money(profit)}`}
           sub={`${profitPct >= 0 ? '+' : ''}${profitPct.toFixed(1)}%`}
           tone={profit >= 0 ? 'pos' : 'neg'}
         />
@@ -1737,11 +1743,11 @@ function CollectionSummary({ transactions = [], activeEntries = [], collections 
   return (
     <>
       <div className="op-stats" style={{ gridTemplateColumns: 'repeat(5, 1fr)' }}>
-        <Stat label="Net cash flow" value={`${totals.net >= 0 ? '+' : ''}$${totals.net.toFixed(2)}`} tone={totals.net >= 0 ? 'pos' : 'neg'} />
-        <Stat label="Bought" value={`$${totals.bought.toFixed(2)}`} />
-        <Stat label="Sold" value={`$${totals.sold.toFixed(2)}`} accent />
-        <Stat label="Expenses" value={`$${totals.expenses.toFixed(2)}`} />
-        <Stat label="Payouts" value={`$${totals.payouts.toFixed(2)}`} />
+        <Stat label="Net cash flow" value={`${totals.net >= 0 ? '+' : ''}${money(totals.net)}`} tone={totals.net >= 0 ? 'pos' : 'neg'} />
+        <Stat label="Bought" value={`${money(totals.bought)}`} />
+        <Stat label="Sold" value={`${money(totals.sold)}`} accent />
+        <Stat label="Expenses" value={`${money(totals.expenses)}`} />
+        <Stat label="Payouts" value={`${money(totals.payouts)}`} />
       </div>
       <EquityPanel
         entries={activeEntries}
@@ -1756,7 +1762,6 @@ function CollectionSummary({ transactions = [], activeEntries = [], collections 
 
 // Sold / history view — cards retained after sale (date_sold set), with realized P&L.
 function SoldView({ entries = [], catalogIndex, variantRev = 0 }) {
-  const money = (n) => `$${(Number(n) || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
   const signed = (n) => `${n >= 0 ? '+' : '-'}${money(Math.abs(n))}`;
   const plColor = (n) => (n > 0 ? '#3d7a4a' : n < 0 ? '#c8442a' : '#888');
 
@@ -2024,34 +2029,34 @@ function EquityPanel({ entries, transactions = [], catalogIndex, totalMarket, co
           return (
             <div key={r.name} className="op-equity-row">
               <div className="op-equity-name">{r.name}</div>
-              <div className="op-equity-num">${r.paid.toFixed(2)}</div>
+              <div className="op-equity-num">{money(r.paid)}</div>
               {mode === 'capital' && (
                 <div className={`op-equity-num ${net >= 0 ? '' : 'is-neg'}`}>
-                  {net >= 0 ? '' : '−'}${Math.abs(net).toFixed(2)}
+                  {net >= 0 ? '' : '−'}{money(Math.abs(net))}
                 </div>
               )}
               {mode === 'time-weighted' && <div className="op-equity-num">{(r.units || 0).toFixed(2)}</div>}
               <div className="op-equity-num">{(r.pct * 100).toFixed(1)}%</div>
-              <div className="op-equity-num">${r.value.toFixed(2)}</div>
+              <div className="op-equity-num">{money(r.value)}</div>
               <div className={`op-equity-num ${gain >= 0 ? 'is-pos' : 'is-neg'}`}>
-                {gain >= 0 ? '+' : ''}${gain.toFixed(2)}
+                {gain >= 0 ? '+' : ''}{money(gain)}
               </div>
             </div>
           );
         })}
         <div className="op-equity-row op-equity-total-row">
           <div>Total</div>
-          <div className="op-equity-num">${equity.totalPaid.toFixed(2)}</div>
+          <div className="op-equity-num">{money(equity.totalPaid)}</div>
           {mode === 'capital' && (
             <div className="op-equity-num">
-              ${equity.rows.reduce((s, r) => s + (r.net != null ? r.net : r.paid), 0).toFixed(2)}
+              {money(equity.rows.reduce((s, r) => s + (r.net != null ? r.net : r.paid), 0))}
             </div>
           )}
           {mode === 'time-weighted' && <div className="op-equity-num">{(equity.totalUnits || 0).toFixed(2)}</div>}
           <div className="op-equity-num">100.0%</div>
-          <div className="op-equity-num">${totalMarket.toFixed(2)}</div>
+          <div className="op-equity-num">{money(totalMarket)}</div>
           <div className={`op-equity-num ${totalMarket - equity.totalPaid >= 0 ? 'is-pos' : 'is-neg'}`}>
-            {totalMarket - equity.totalPaid >= 0 ? '+' : ''}${(totalMarket - equity.totalPaid).toFixed(2)}
+            {totalMarket - equity.totalPaid >= 0 ? '+' : ''}{money((totalMarket - equity.totalPaid))}
           </div>
         </div>
       </div>
@@ -2170,15 +2175,15 @@ function EntryRow({ entry, card, marketValue, marketKnown = true, expenses = 0, 
         </div>
         <div className="op-entry-cell">
           <div className="op-entry-cell-label">{hasExpenses ? 'Cost basis' : 'Paid'}</div>
-          <div className="op-entry-cell-val">${(costBasis ?? paid).toFixed(2)}</div>
+          <div className="op-entry-cell-val">{money((costBasis ?? paid))}</div>
           {hasExpenses && (
-            <div className="op-entry-cell-sub">${paid.toFixed(2)} + ${expenses.toFixed(2)} exp</div>
+            <div className="op-entry-cell-sub">{money(paid)} + {money(expenses)} exp</div>
           )}
         </div>
         <div className="op-entry-cell">
           <div className="op-entry-cell-label">Market</div>
           <div className="op-entry-cell-val" title={!marketKnown ? 'No graded price entered yet — edit the entry to add one' : undefined}>
-            {marketKnown ? `$${(marketValue || 0).toFixed(2)}` : '—'}
+            {marketKnown ? `${money((marketValue || 0))}` : '—'}
           </div>
           {!marketKnown && (
             <div className="op-entry-cell-sub">graded price pending</div>
@@ -2187,7 +2192,7 @@ function EntryRow({ entry, card, marketValue, marketKnown = true, expenses = 0, 
         {marketKnown ? (
           <div className={`op-entry-delta ${delta >= 0 ? 'is-pos' : 'is-neg'}`}>
             {delta >= 0 ? <TrendingUp size={14} /> : <TrendingDown size={14} />}
-            {delta >= 0 ? '+' : ''}${delta.toFixed(2)}
+            {delta >= 0 ? '+' : ''}{money(delta)}
           </div>
         ) : (
           <div className="op-entry-delta">—</div>
@@ -2516,7 +2521,7 @@ function SellModal({ entry, card, members = [], onClose, onSave }) {
               {card ? `${card.displayId || card.id} · ${card.setName}` : ''}
             </div>
             <div className="op-modal-market">
-              Originally paid: <strong>${paid.toFixed(2)}</strong>
+              Originally paid: <strong>{money(paid)}</strong>
             </div>
           </div>
         </div>
@@ -2541,7 +2546,7 @@ function SellModal({ entry, card, members = [], onClose, onSave }) {
 
           {amount && (
             <div className={`op-graded-meta ${profit >= 0 ? '' : 'op-graded-error'}`}>
-              {profit >= 0 ? 'Realized gain' : 'Realized loss'}: <strong>{profit >= 0 ? '+' : ''}${profit.toFixed(2)}</strong>
+              {profit >= 0 ? 'Realized gain' : 'Realized loss'}: <strong>{profit >= 0 ? '+' : ''}{money(profit)}</strong>
               {paid > 0 && <> ({((profit / paid) * 100).toFixed(1)}%)</>}
             </div>
           )}
@@ -2569,7 +2574,7 @@ function SellModal({ entry, card, members = [], onClose, onSave }) {
 
             {contributions.length > 0 && (
               <div className={`op-contrib-check ${splitMismatch ? 'is-warn' : 'is-ok'}`}>
-                Splits total: <strong>${splitTotal.toFixed(2)}</strong> of <strong>${amountNum.toFixed(2)}</strong>
+                Splits total: <strong>{money(splitTotal)}</strong> of <strong>{money(amountNum)}</strong>
                 {splitMismatch && <span> · doesn't match sale price</span>}
               </div>
             )}
@@ -2690,7 +2695,7 @@ function WatchRow({ w, card, onCardClick, onRemove, onUpdate }) {
         <div className="op-watch-name">{card ? card.name : w.card_display_name || w.card_id}</div>
         <div className="op-watch-meta">
           {card ? <>{card.displayId || card.id} · {card.setName}</> : <>{w.card_id} · (not in catalog)</>}
-          {raw > 0 && <> · Raw <strong>${raw.toFixed(2)}</strong></>}
+          {raw > 0 && <> · Raw <strong>{money(raw)}</strong></>}
         </div>
       </div>
       <div className="op-watch-field">
@@ -2707,7 +2712,7 @@ function WatchRow({ w, card, onCardClick, onRemove, onUpdate }) {
         <label>Last seen</label>
         {lastSeen > 0 ? (
           <a href={w.last_seen_url || '#'} target="_blank" rel="noreferrer" className={beatsTarget ? 'is-hit' : ''}>
-            ${lastSeen.toFixed(2)}{w.last_seen_source ? ` · ${w.last_seen_source}` : ''}
+            {money(lastSeen)}{w.last_seen_source ? ` · ${w.last_seen_source}` : ''}
           </a>
         ) : (
           <span className="op-watch-empty">—</span>
@@ -3019,7 +3024,7 @@ function AddByCertModal({ catalog, collections, activeCollectionId, onClose, onS
                 ))}
                 {contributions.length > 0 && (
                   <div className={`op-contrib-check ${contribMismatch ? 'is-warn' : 'is-ok'}`}>
-                    Splits total: <strong>${contribTotal.toFixed(2)}</strong> of <strong>${priceNum.toFixed(2)}</strong>
+                    Splits total: <strong>{money(contribTotal)}</strong> of <strong>{money(priceNum)}</strong>
                     {contribMismatch && <span> · doesn't match total paid</span>}
                   </div>
                 )}
@@ -3053,12 +3058,12 @@ function AddByCertModal({ catalog, collections, activeCollectionId, onClose, onS
                       <div className="op-resolve-diag-row">
                         <span>PSA APR suggestion</span>
                         <strong>
-                          ${Number(aprSuggestion.suggested_price).toFixed(2)}
+                          {money(Number(aprSuggestion.suggested_price))}
                           {' '}
                           <span style={{ fontWeight: 400, color: 'var(--ink-soft)' }}>
                             (median of {aprSuggestion.sample_count} sales · {aprSuggestion.window_days}d
                             {aprSuggestion.low != null && aprSuggestion.high != null
-                              ? ` · $${aprSuggestion.low.toFixed(2)}–$${aprSuggestion.high.toFixed(2)}` : ''})
+                              ? ` · ${money(aprSuggestion.low)}–${money(aprSuggestion.high)}` : ''})
                           </span>
                         </strong>
                       </div>
@@ -3245,7 +3250,7 @@ function TradeModal({ members = [], collection, entries = [], catalog = [], cata
                   const isGraded = Boolean(e.grading_company);
                   return (
                     <option key={e.id} value={e.id}>
-                      {(c ? `${c.displayId || c.id} · ${c.name}` : e.card_id)}{isGraded ? ` (${e.grading_company} ${e.grade})` : ''} — {isGraded && Number(e.graded_price) > 0 ? 'value' : 'paid'} ${refPriceOf(e).toFixed(2)}
+                      {(c ? `${c.displayId || c.id} · ${c.name}` : e.card_id)}{isGraded ? ` (${e.grading_company} ${e.grade})` : ''} — {isGraded && Number(e.graded_price) > 0 ? 'value' : 'paid'} {money(refPriceOf(e))}
                     </option>
                   );
                 })}
@@ -3260,7 +3265,7 @@ function TradeModal({ members = [], collection, entries = [], catalog = [], cata
               <div key={o.entryId} className="op-form-row" style={{ alignItems: 'flex-end', gap: 8 }}>
                 <div style={{ flex: 1, fontSize: 13, paddingBottom: 8 }}>
                   {c ? `${c.displayId || c.id} · ${c.name}` : (e?.card_id || o.entryId)}
-                  {e && <span style={{ opacity: 0.55, marginLeft: 6 }}>· {isGraded && Number(e.graded_price) > 0 ? 'value' : 'paid'} ${refPriceOf(e).toFixed(2)}</span>}
+                  {e && <span style={{ opacity: 0.55, marginLeft: 6 }}>· {isGraded && Number(e.graded_price) > 0 ? 'value' : 'paid'} {money(refPriceOf(e))}</span>}
                 </div>
                 <Field label="Credit value">
                   <input type="number" step="0.01" value={o.value} onChange={(ev) => updateOutgoing(o.entryId, ev.target.value)} placeholder="0.00" />
@@ -3366,7 +3371,7 @@ function TradeModal({ members = [], collection, entries = [], catalog = [], cata
           </Field>
 
           <div style={{ fontSize: 13, padding: '8px 10px', borderRadius: 8, background: balanced ? 'rgba(70,160,90,0.14)' : 'rgba(200,130,40,0.16)' }}>
-            Giving ${giveTotal.toFixed(2)} · Receiving ${getTotal.toFixed(2)} · {balanced ? 'Balanced' : `${diff > 0 ? 'getting' : 'giving'} $${Math.abs(diff).toFixed(2)} more`}
+            Giving {money(giveTotal)} · Receiving {money(getTotal)} · {balanced ? 'Balanced' : `${diff > 0 ? 'getting' : 'giving'} ${money(Math.abs(diff))} more`}
           </div>
 
           <div className="op-form-actions">
@@ -3569,7 +3574,7 @@ function ExpenseModal({ members = [], collection, card = null, entry = null, onC
             ))}
             {contributions.length > 0 && (
               <div className={`op-contrib-check ${splitMismatch ? 'is-warn' : 'is-ok'}`}>
-                Splits total: <strong>${splitTotal.toFixed(2)}</strong> of <strong>${amt.toFixed(2)}</strong>
+                Splits total: <strong>{money(splitTotal)}</strong> of <strong>{money(amt)}</strong>
                 {splitMismatch && <span> · doesn't match expense total</span>}
               </div>
             )}
@@ -3676,7 +3681,7 @@ function PayoutModal({ members = [], collection, onClose, onSave }) {
             ))}
             {contributions.length > 0 && (
               <div className={`op-contrib-check ${splitMismatch ? 'is-warn' : 'is-ok'}`}>
-                Splits total: <strong>${splitTotal.toFixed(2)}</strong> of <strong>${amt.toFixed(2)}</strong>
+                Splits total: <strong>{money(splitTotal)}</strong> of <strong>{money(amt)}</strong>
                 {splitMismatch && <span> · doesn't match payout total</span>}
               </div>
             )}
@@ -3883,7 +3888,7 @@ function BulkGradingModal({ entries, catalogIndex, members = [], collectionId, o
             )}
 
             <div className="op-bulk-total">
-              Submission total: <strong>${totalCost.toFixed(2)}</strong>
+              Submission total: <strong>{money(totalCost)}</strong>
               {numCards > 0 && <> · {numCards} {numCards === 1 ? 'card' : 'cards'}</>}
             </div>
           </div>
@@ -3909,7 +3914,7 @@ function BulkGradingModal({ entries, catalogIndex, members = [], collectionId, o
               />
             ))}
             <div className={`op-contrib-check ${mismatch ? 'is-warn' : 'is-ok'}`}>
-              Payer total: <strong>${totalPaid.toFixed(2)}</strong> of <strong>${totalCost.toFixed(2)}</strong>
+              Payer total: <strong>{money(totalPaid)}</strong> of <strong>{money(totalCost)}</strong>
               {mismatch && totalCost > 0 && <span> · doesn't match submission total</span>}
             </div>
           </div>
@@ -4197,7 +4202,7 @@ function TransactionRow({ tx, collection, catalogIndex, onEdit, onDelete }) {
             {display}
             {!fullyAttributed && (
               <span
-                title={`Contributions ($${attributed.toFixed(2)}) don't cover the $${amount.toFixed(2)} amount — $${(amount - attributed).toFixed(2)} unattributed`}
+                title={`Contributions (${money(attributed)}) don't cover the ${money(amount)} amount — ${money((amount - attributed))} unattributed`}
                 style={{ display: 'inline-flex', alignItems: 'center', gap: 3, marginLeft: 8, padding: '1px 6px', borderRadius: 5, background: 'rgba(217,131,36,0.18)', color: '#d98324', fontSize: 11, fontWeight: 600, verticalAlign: 'middle' }}
               >
                 <AlertTriangle size={11} /> unattributed
@@ -4208,14 +4213,14 @@ function TransactionRow({ tx, collection, catalogIndex, onEdit, onDelete }) {
             {collection?.name || '—'}
             {tx.occurred_at && <> · {tx.occurred_at}</>}
             {tx.contributions && tx.contributions.length > 0 && (
-              <> · {tx.contributions.map(c => `${c.name} ${Number(c.amount) >= 0 ? '+' : '−'}$${Math.abs(Number(c.amount)).toFixed(2)}`).join(', ')}</>
+              <> · {tx.contributions.map(c => `${c.name} ${Number(c.amount) >= 0 ? '+' : '−'}${money(Math.abs(Number(c.amount)))}`).join(', ')}</>
             )}
           </div>
           {tx.notes && <div className="op-tx-notes">{tx.notes}</div>}
         </div>
       </div>
       <div className={`op-tx-amount ${meta.tone}`}>
-        {meta.sign}${amount.toFixed(2)}
+        {meta.sign}{money(amount)}
       </div>
       {(onEdit || onDelete) && (
         <div className="op-tx-actions" style={{ display: 'inline-flex', alignItems: 'center', gap: 2 }}>
@@ -4309,7 +4314,7 @@ function EditTransactionModal({ tx, members = [], onClose, onSave }) {
           ))}
           {contribs.length > 0 && (
             <div className={`op-contrib-check ${mismatch ? 'is-warn' : 'is-ok'}`}>
-              Contribution total: <strong>${contribTotal.toFixed(2)}</strong>{expectBalance && <> of <strong>${amt.toFixed(2)}</strong></>}
+              Contribution total: <strong>{money(contribTotal)}</strong>{expectBalance && <> of <strong>{money(amt)}</strong></>}
               {mismatch && <span> · doesn't match the amount</span>}
             </div>
           )}
@@ -4678,7 +4683,7 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
                   {attrsOf(currentCard).map(k => ` · ${attrLabel(k)}`).join('')}
                 </div>
                 <div className="op-resolve-side-sub">
-                  Market: ${effectiveRawPrice(currentCard).toFixed(2)}
+                  Market: {money(effectiveRawPrice(currentCard))}
                 </div>
                 {currentCard.tcgplayerUrl && (
                   <a className="op-resolve-side-link" href={currentCard.tcgplayerUrl} target="_blank" rel="noreferrer">
@@ -4714,7 +4719,7 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
                       ))}
                       <span className="op-resolve-candidate-tag">{rp.rarity || '?'}</span>
                       <span className="op-resolve-candidate-price">
-                        {rp.marketPrice > 0 ? `$${Number(rp.marketPrice).toFixed(2)}` : '—'}
+                        {rp.marketPrice > 0 ? `${money(Number(rp.marketPrice))}` : '—'}
                       </span>
                     </div>
                   </button>
@@ -4808,7 +4813,7 @@ function CardTile({ card, onAddCard, onCardClick, onToggleWatch = () => {}, isWa
           </div>
           <div className="op-card-tile-price">
             <span className="op-card-tile-price-label">Raw</span>
-            <span className="op-card-tile-price-val">${effectiveRawPrice(card).toFixed(2)}</span>
+            <span className="op-card-tile-price-val">{money(effectiveRawPrice(card))}</span>
           </div>
         </div>
       </button>
@@ -4960,7 +4965,7 @@ function AddCardModal({ card, entry, collections, activeCollectionId, onClose, o
             </div>
             <div className="op-modal-sub">{card.displayId || card.id} · {card.setName} · {RARITY_LABELS[card.rarity] || card.rarity}</div>
             <div className="op-modal-market">
-              Raw: <strong>${effectiveRawPrice(card).toFixed(2)}</strong>
+              Raw: <strong>{money(effectiveRawPrice(card))}</strong>
             </div>
           </div>
         </div>
@@ -5026,7 +5031,7 @@ function AddCardModal({ card, entry, collections, activeCollectionId, onClose, o
 
             {contributions.length > 0 && (
               <div className={`op-contrib-check ${contribMismatch ? 'is-warn' : 'is-ok'}`}>
-                Splits total: <strong>${contribTotal.toFixed(2)}</strong> of <strong>${priceNum.toFixed(2)}</strong>
+                Splits total: <strong>{money(contribTotal)}</strong> of <strong>{money(priceNum)}</strong>
                 {contribMismatch && <span> · doesn't match total paid</span>}
               </div>
             )}
@@ -5194,10 +5199,10 @@ function CardDetailDrawer({ card, entries, collections, watchEntry, recentSales 
 
         <div className="op-drawer-body">
           <div className="op-price-grid">
-            <PriceCell label="Market" value={`$${effectiveRawPrice(card).toFixed(2)}`} accent />
-            {card.lowPrice > 0 && <PriceCell label="Low" value={`$${Number(card.lowPrice).toFixed(2)}`} />}
-            {card.midPrice > 0 && <PriceCell label="Mid" value={`$${Number(card.midPrice).toFixed(2)}`} />}
-            {card.highPrice > 0 && <PriceCell label="High" value={`$${Number(card.highPrice).toFixed(2)}`} />}
+            <PriceCell label="Market" value={`${money(effectiveRawPrice(card))}`} accent />
+            {card.lowPrice > 0 && <PriceCell label="Low" value={`${money(Number(card.lowPrice))}`} />}
+            {card.midPrice > 0 && <PriceCell label="Mid" value={`${money(Number(card.midPrice))}`} />}
+            {card.highPrice > 0 && <PriceCell label="High" value={`${money(Number(card.highPrice))}`} />}
           </div>
 
           <div className="op-section-title"><Award size={15} /> Classifications</div>
@@ -5349,12 +5354,12 @@ function CardDetailDrawer({ card, entries, collections, watchEntry, recentSales 
                           {isGraded && <GradingBadge company={entry.grading_company} grade={entry.grade} bgsBlack={entry.bgs_black} gradeDescription={entry.grade_description} />}
                         </div>
                         <div className="op-detail-entry-meta">
-                          {isGraded ? `${entry.grading_company} ${entry.grade}${entry.bgs_black ? (entry.grading_company === 'CGC' ? ' Pristine' : ' Black Label') : ''}` : entry.condition} · Paid ${Number(entry.purchase_price || 0).toFixed(2)}
+                          {isGraded ? `${entry.grading_company} ${entry.grade}${entry.bgs_black ? (entry.grading_company === 'CGC' ? ' Pristine' : ' Black Label') : ''}` : entry.condition} · Paid {money(Number(entry.purchase_price || 0))}
                           {entry.acquired_at && <> · Acquired {entry.acquired_at}</>}
                         </div>
                         {isGraded && (
                           <div className="op-detail-entry-meta">
-                            Graded market: <strong>${Number(entry.graded_price || 0).toFixed(2)}</strong>
+                            Graded market: <strong>{money(Number(entry.graded_price || 0))}</strong>
                             {entry.cert_number && <> · Cert # {entry.cert_number}</>}
                             {entry.price_fetched_at && <> · updated {new Date(entry.price_fetched_at).toLocaleDateString()}</>}
                           </div>
@@ -5367,7 +5372,7 @@ function CardDetailDrawer({ card, entries, collections, watchEntry, recentSales 
                     {entry.contributions && entry.contributions.length > 0 && (
                       <div className="op-detail-entry-splits">
                         {entry.contributions.map((c, i) => (
-                          <span key={i} className="op-split-chip">{c.name}: ${Number(c.amount).toFixed(2)}</span>
+                          <span key={i} className="op-split-chip">{c.name}: {money(Number(c.amount))}</span>
                         ))}
                       </div>
                     )}
@@ -5406,7 +5411,7 @@ function CardDetailDrawer({ card, entries, collections, watchEntry, recentSales 
                         )}
                       </div>
                       <div className="op-drawer-sale-side">
-                        <div className="op-drawer-sale-price">${Number(s.sale_price).toFixed(2)}</div>
+                        <div className="op-drawer-sale-price">{money(Number(s.sale_price))}</div>
                         <div className="op-drawer-sale-date">{s.sale_date}</div>
                         {s.listing_url && <ExternalLink size={12} className="op-drawer-sale-icon" />}
                       </div>
@@ -5602,7 +5607,7 @@ function SalesView({ sales, catalogIndex, onAddSale, onEditSale, onRemoveSale, o
       {filtered.length > 0 && (
         <div className="op-sales-summary">
           <span>{filtered.length} {filtered.length === 1 ? 'sale' : 'sales'} matching filters</span>
-          <span>Total: ${totalValue.toFixed(2)}</span>
+          <span>Total: {money(totalValue)}</span>
         </div>
       )}
 
@@ -5665,7 +5670,7 @@ function SalesView({ sales, catalogIndex, onAddSale, onEditSale, onRemoveSale, o
                   {s.notes && <div className="op-sales-row-notes">{s.notes}</div>}
                 </div>
                 <div className="op-sales-row-side">
-                  <div className="op-sales-row-price">${Number(s.sale_price).toFixed(2)}</div>
+                  <div className="op-sales-row-price">{money(Number(s.sale_price))}</div>
                   <div className="op-sales-row-date">{s.sale_date}</div>
                   <div className="op-sales-row-actions">
                     {s.listing_url && (
