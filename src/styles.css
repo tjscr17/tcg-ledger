@@ -82,12 +82,14 @@ body { background: var(--paper); }
 .op-brand { display: flex; align-items: center; gap: 14px; }
 .op-brand-mark {
   width: 42px; height: 42px;
-  background: var(--navy-deep);
-  color: var(--gold-soft);
   display: grid; place-items: center;
-  border: 2px solid var(--gold);
-  box-shadow: 0 2px 0 var(--navy);
-  transform: rotate(-3deg);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.op-brand-mark img {
+  width: 100%; height: 100%;
+  object-fit: contain;
+  display: block;
 }
 .op-brand-name {
   font-family: var(--display); font-weight: 700; font-size: 24px;

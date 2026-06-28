@@ -1228,7 +1228,7 @@ function Header({ view, setView, collections, activeCollectionId, setActiveColle
   return (
     <header className="op-header">
       <div className="op-brand">
-        <div className="op-brand-mark"><Anchor size={22} strokeWidth={2.5} /></div>
+        <div className="op-brand-mark"><img src="/favicon.png" alt="TCG Ledger logo" /></div>
         <div>
           <div className="op-brand-name">50.50</div>
           <div className="op-brand-sub">TCG Ledger · Collection Tracker</div>
