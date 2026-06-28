@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useRef, useCallback, useReducer } from 'react';
 import { Search, Plus, X, TrendingUp, TrendingDown, Folder, Trash2, DollarSign, Anchor, ChevronRight, Package, BarChart3, RefreshCw, Cloud, HardDrive, ImageOff, Award, Loader2, Pencil, Eye, EyeOff, Receipt, ExternalLink, AlertTriangle } from 'lucide-react';
 import { store, MODE, VAULT_LABEL, getLastStoreError } from './storage.js';
-import { loadCatalog, groupBySet, compareSets, compareCards, augmentWithErrata, hasPreErrata, togglePreErrata, searchAlternateSource, deriveVariantKey, addExternalCard } from './catalog.js';
+import { loadCatalog, loadRarities, groupBySet, compareSets, compareCards, augmentWithErrata, hasPreErrata, togglePreErrata, searchAlternateSource, deriveVariantKey, addExternalCard } from './catalog.js';
 import { hasPsaToken, fetchCert, fetchAuctionPrices, findCandidateCards } from './psa.js';
 import { runCanonicalMigration, runPcCleanup, runTcgplayerMigration, runClearLegacyResolutions } from './migrate.js';
 import {
@@ -247,6 +247,9 @@ export default function App() {
   const [addExternalOpen, setAddExternalOpen] = useState(false);
   const [expenseForEntry, setExpenseForEntry] = useState(null); // entry object
 
+  // Per-TCG rarity lookup for the rarity filters ({ [tcgCode]: [{code,label,sort_order}] }).
+  const [raritiesByTcg, setRaritiesByTcg] = useState({});
+
   // Load card catalog
   useEffect(() => {
     (async () => {
@@ -260,6 +263,7 @@ export default function App() {
         setCatalogLoading(false);
       }
     })();
+    loadRarities().then(setRaritiesByTcg).catch(() => {});
   }, []);
 
   // Pull shared-mode TCGCSV resolutions into the local cache, then subscribe
@@ -997,6 +1001,7 @@ export default function App() {
           <SearchView
             catalog={augmentedCatalog}
             watchlist={watchlist}
+            raritiesByTcg={raritiesByTcg}
             variantRev={variantRev}
             onAddCard={setAddingCard}
             onAddExternal={() => setAddExternalOpen(true)}
@@ -1013,6 +1018,7 @@ export default function App() {
           <ResolveView
             catalog={augmentedCatalog}
             entries={entries}
+            raritiesByTcg={raritiesByTcg}
             onAddCard={setAddingCard}
             onCardClick={setDetailCard}
           />
@@ -1225,7 +1231,7 @@ function Header({ view, setView, collections, activeCollectionId, setActiveColle
         <div className="op-brand-mark"><Anchor size={22} strokeWidth={2.5} /></div>
         <div>
           <div className="op-brand-name">50.50</div>
-          <div className="op-brand-sub">One Piece TCG · Collection Tracker</div>
+          <div className="op-brand-sub">TCG Ledger · Collection Tracker</div>
         </div>
       </div>
 
@@ -1492,7 +1498,7 @@ function CollectionView({ collection, entries, transactions = [], catalogIndex, 
         <div className="op-empty">
           <Package size={36} strokeWidth={1.2} />
           <div className="op-empty-title">This collection is empty</div>
-          <div className="op-empty-sub">Search the One Piece TCG catalog and add your first card to start tracking.</div>
+          <div className="op-empty-sub">Search the catalog and add your first card to start tracking.</div>
           <button className="op-btn-primary" onClick={onSearchClick}>
             <Search size={15} /> Open the Catalog
           </button>
@@ -2282,9 +2288,40 @@ function CardThumb({ card, size = 60 }) {
 }
 
 // ============================================================================
-function SearchView({ catalog, watchlist = [], variantRev = 0, onAddCard, onAddExternal = () => {}, onCardClick, onToggleWatch = () => {} }) {
+// Distinct TCGs present in the catalog, for the "Game" filter dropdown.
+// Returns [{v,l}] with an "All games" head. Sorted by display name.
+const tcgFilterOptions = (catalog) => {
+  const m = new Map();
+  for (const c of catalog) {
+    if (!c.tcgCode) continue;
+    if (!m.has(c.tcgCode)) m.set(c.tcgCode, c.tcgName || c.tcgCode);
+  }
+  const list = [...m].sort((a, b) => a[1].localeCompare(b[1])).map(([v, l]) => ({ v, l }));
+  return [{ v: 'all', l: 'All games' }, ...list];
+};
+
+// Rarity dropdown options for the active TCG. Orders/labels via the per-TCG
+// rarities table when available; otherwise derives distinct rarities from the
+// (already TCG-scoped) cards. Always shows only rarities actually present.
+const rarityFilterOptions = (cards, tcgFilter, raritiesByTcg = {}) => {
+  const present = new Set();
+  for (const c of cards) if (c.rarity) present.add(c.rarity);
+  const table = tcgFilter !== 'all' ? raritiesByTcg[tcgFilter] : null;
+  if (table && table.length) {
+    const order = new Map(table.map((r, i) => [r.code, r.sort_order ?? i]));
+    const labels = new Map(table.map(r => [r.code, r.label || r.code]));
+    const ordered = [...present].sort(
+      (a, b) => (order.get(a) ?? 999) - (order.get(b) ?? 999) || a.localeCompare(b)
+    );
+    return [{ v: 'all', l: 'All rarities' }, ...ordered.map(v => ({ v, l: labels.get(v) || RARITY_LABELS[v] || v }))];
+  }
+  return [{ v: 'all', l: 'All rarities' }, ...[...present].sort().map(v => ({ v, l: RARITY_LABELS[v] || v }))];
+};
+
+function SearchView({ catalog, watchlist = [], raritiesByTcg = {}, variantRev = 0, onAddCard, onAddExternal = () => {}, onCardClick, onToggleWatch = () => {} }) {
   const watchedIds = useMemo(() => new Set(watchlist.map(w => w.card_id)), [watchlist]);
   const [q, setQ] = useStoredState('optcg:search:q', '');
+  const [tcgFilter, setTcgFilter] = useStoredState('optcg:search:tcgFilter', 'all');
   const [setFilter, setSetFilter] = useStoredState('optcg:search:setFilter', 'all');
   // Post-TCGPlayer-source switch (2026-06-01): refine/hide by Color and Type
   // are gone — TCGPlayer doesn't expose color/cost/type/power/text, so those
@@ -2308,19 +2345,32 @@ function SearchView({ catalog, watchlist = [], variantRev = 0, onAddCard, onAddE
   };
   const clearHiddenRarities = () => setHiddenRarities(new Set());
 
-  // All distinct sets, sorted
+  // Cards scoped to the active TCG (before set/rarity/search refinement). The
+  // set + rarity options below derive from this so One Piece sets don't show
+  // when Riftbound is selected, and vice-versa.
+  const tcgCards = useMemo(
+    () => (tcgFilter === 'all' ? catalog : catalog.filter(c => c.tcgCode === tcgFilter)),
+    [catalog, tcgFilter]
+  );
+  const tcgs = useMemo(() => tcgFilterOptions(catalog), [catalog]);
+
+  // Switching TCG resets the TCG-specific refinements (an OP set filter is
+  // meaningless under Riftbound).
+  const onTcgChange = (v) => { setTcgFilter(v); setSetFilter('all'); setFilterValue('all'); };
+
+  // Distinct sets for the active TCG, sorted.
   const sets = useMemo(() => {
     const m = new Map();
-    for (const c of catalog) {
+    for (const c of tcgCards) {
       if (!c.setId) continue;
       if (!m.has(c.setId)) m.set(c.setId, { id: c.setId, name: c.setName });
     }
     return Array.from(m.values()).sort((a, b) => compareSets({ setId: a.id }, { setId: b.id }));
-  }, [catalog]);
+  }, [tcgCards]);
 
   const filtered = useMemo(() => {
     const needle = q.trim().toLowerCase();
-    return catalog.filter(c => {
+    return tcgCards.filter(c => {
       if (hiddenRarities.has(c.rarity)) return false;
       if (setFilter !== 'all' && c.setId !== setFilter) return false;
       if (filterValue !== 'all' && c.rarity !== filterValue) return false;
@@ -2331,14 +2381,13 @@ function SearchView({ catalog, watchlist = [], variantRev = 0, onAddCard, onAddE
         (c.displayId || '').toLowerCase().includes(needle) ||
         (c.setName || '').toLowerCase().includes(needle);
     });
-  }, [catalog, q, setFilter, filterValue, hiddenRarities]);
+  }, [tcgCards, q, setFilter, filterValue, hiddenRarities]);
 
-  // Distinct rarity values present in the catalog, for the rarity dropdown.
-  const rarityOptions = useMemo(() => {
-    const seen = new Set();
-    for (const c of catalog) if (c.rarity) seen.add(c.rarity);
-    return [{ v: 'all', l: 'All rarities' }, ...[...seen].sort().map(v => ({ v, l: RARITY_LABELS[v] || v }))];
-  }, [catalog]);
+  // Rarity dropdown options for the active TCG (ordered via the rarities table).
+  const rarityOptions = useMemo(
+    () => rarityFilterOptions(tcgCards, tcgFilter, raritiesByTcg),
+    [tcgCards, tcgFilter, raritiesByTcg]
+  );
 
   const sorted = useMemo(() => {
     const arr = [...filtered];
@@ -2393,6 +2442,10 @@ function SearchView({ catalog, watchlist = [], variantRev = 0, onAddCard, onAddE
       </div>
 
       <div className="op-filters">
+        {tcgs.length > 2 && (
+          <FilterGroup label="Game" value={tcgFilter} onChange={onTcgChange} mode="select" options={tcgs} />
+        )}
+
         <FilterGroup label="Set" value={setFilter} onChange={setSetFilter} mode="select" options={[
           { v: 'all', l: 'All Sets' },
           ...sets.map(s => ({ v: s.id, l: `${s.id} · ${s.name}` })),
@@ -4478,9 +4531,11 @@ function VariantsModal({ onClose }) {
 // build time). The Unresolved + Issues queues are kept but mostly empty;
 // the page's real purpose is now browsing, picking overrides when needed,
 // surfacing reports, and managing printing-attribute variants.
-function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
+function ResolveView({ catalog, entries, raritiesByTcg = {}, onAddCard, onCardClick }) {
   const [filterMode, setFilterMode] = useState('all'); // 'unresolved' | 'in-collection' | 'issues' | 'reported' | 'all'
+  const [tcgFilter, setTcgFilter] = useStoredState('optcg:catalog:tcgFilter', 'all');
   const [search, setSearch] = useState('');
+  const tcgs = useMemo(() => tcgFilterOptions(catalog), [catalog]);
   const [showVariants, setShowVariants] = useState(false);
   // In these queues, resolving a card makes it no longer qualify, so it
   // drops out and the next card slides into the current index. We must NOT
@@ -4541,6 +4596,7 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
     } else {
       base = catalog;
     }
+    if (tcgFilter !== 'all') base = base.filter(c => c.tcgCode === tcgFilter);
     const q = search.trim().toLowerCase();
     if (!q) return base;
     return base.filter(c => {
@@ -4551,7 +4607,7 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
       return false;
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [catalog, entries, filterMode, resolveRev, search]);
+  }, [catalog, entries, filterMode, tcgFilter, resolveRev, search]);
 
 
   const currentCard = queue[index];
@@ -4559,7 +4615,7 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
 
   useEffect(() => {
     setIndex(0);
-  }, [filterMode, search]);
+  }, [filterMode, tcgFilter, search]);
 
   // Other catalog cards that share this card's number — siblings (base vs
   // parallel vs manga, plus any release-event / tournament print of the same
@@ -4595,9 +4651,9 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
           <div className="op-eyebrow">Catalog browser</div>
           <h1 className="op-page-title">Catalog</h1>
           <div className="op-page-sub">
-            Browse every TCGPlayer printing, jump between related printings
-            of the same card number, manage variant-detection rules, and
-            review cards you've flagged.
+            Browse every printing, jump between related printings of the same
+            card number, manage variant-detection rules, and review cards
+            you've flagged.
           </div>
           {getHydratedResolutionCount() >= 0 && (
             <div className="op-page-sub" style={{ marginTop: 4 }}>
@@ -4614,6 +4670,10 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
       </div>
 
       <div className="op-filters">
+        {tcgs.length > 2 && (
+          <FilterGroup label="Game" value={tcgFilter} onChange={setTcgFilter} mode="select" options={tcgs} />
+        )}
+
         <FilterGroup label="View" value={filterMode} onChange={setFilterMode} mode="select" options={[
           { v: 'all', l: `All cards (${counts.total.toLocaleString()})` },
           { v: 'in-collection', l: 'Cards in my collections' },
@@ -4667,7 +4727,7 @@ function ResolveView({ catalog, entries, onAddCard, onCardClick }) {
 
           <div className="op-resolve-card">
             <div className="op-resolve-side">
-              <div className="op-eyebrow">OPTCG catalog</div>
+              <div className="op-eyebrow">Catalog</div>
               <div className="op-resolve-art" onClick={() => onCardClick(currentCard)} role="button">
                 <CardArt card={currentCard} needsVariant />
               </div>

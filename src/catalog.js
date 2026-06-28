@@ -35,7 +35,7 @@ const CATALOG_URL = 'https://ajpxzfhmyzzgarewijnr.supabase.co';
 const CATALOG_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFqcHh6ZmhteXp6Z2FyZXdpam5yIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzkxNTM3MjQsImV4cCI6MjA5NDcyOTcyNH0.YQ4V0pxw1tpOiVe_d9nxL0UqbHR-eFPTjiybpd2O28o';
 const catalogClient = createClient(CATALOG_URL, CATALOG_KEY);
 
-const CACHE_KEY = 'optcg:catalog:v13-supabase'; // v13: imageUrl now routes via /api/img proxy
+const CACHE_KEY = 'optcg:catalog:v14-multitcg'; // v14: all TCGs, each card carries tcgCode/tcgName
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24h
 const LANGUAGE = 'EN'; // catalog is EN-West for now; other langs exist in DB
 const PAGE = 1000; // PostgREST default max rows per request
@@ -45,8 +45,9 @@ const normSetToken = (s) => String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, 
 // Supabase cards row (joined to sets) → catalog card object. Keeps the field
 // names the rest of the app already reads (displayId, setId, imageUrl, …) so
 // consumers don't change; identity moves to the UUID `id`/`canonicalId`.
-const normalize = (row) => {
+const normalize = (row, tcgNames = {}) => {
   const set = row.sets || {};
+  const tcgCode = set.tcg_code || '';
   const variant = row.variant_key || 'base';
   const isBase = variant === 'base';
   // external_id (printing image filename): card_code, or card_code_pN/_rN.
@@ -62,6 +63,8 @@ const normalize = (row) => {
     setId: set.set_code || '',
     setName: set.name || '',
     setAbbreviation: set.set_code || '',
+    tcgCode,                              // e.g. OP / RIFT / UA — for the TCG filter
+    tcgName: tcgNames[tcgCode] || tcgCode,
     rarity: row.rarity || '',
     category: row.category || '',
     // Bandai art goes through the same-origin proxy (can't hotlink their CDN);
@@ -164,16 +167,18 @@ export const loadCatalog = async ({ force = false } = {}) => {
   return revalidateCatalog();
 };
 
-// Page through every EN bandai-official printing (PostgREST caps a single
+// Page through every EN printing across ALL TCGs (PostgREST caps a single
 // request at ~1000 rows, so we range-paginate until a short page returns).
+// No source filter: One Piece (bandai-official/tcgplayer), Riftbound
+// (riftcodex), Union Arena (unionarena-na), etc. all come through. Each row
+// carries its set's tcg_code so the UI can filter by game.
 const fetchAllCards = async () => {
   const all = [];
   let from = 0;
   for (;;) {
     const { data, error } = await catalogClient
       .from('cards')
-      .select('id,card_code,variant_key,name,rarity,category,image_url,source,sets!inner(set_code,name,language)')
-      .in('source', ['bandai-official', 'tcgplayer'])
+      .select('id,card_code,variant_key,name,rarity,category,image_url,source,sets!inner(set_code,name,language,tcg_code)')
       .eq('sets.language', LANGUAGE)
       .order('card_code', { ascending: true })
       .range(from, from + PAGE - 1);
@@ -186,11 +191,45 @@ const fetchAllCards = async () => {
   return all;
 };
 
+// tcg_code -> display name (One Piece Card Game, Riftbound, …). Small table.
+const fetchTcgNames = async () => {
+  const { data, error } = await catalogClient.from('tcgs').select('tcg_code,name');
+  if (error) { console.warn('[catalog] tcgs fetch failed', error); return {}; }
+  const map = {};
+  for (const t of (data || [])) map[t.tcg_code] = t.name;
+  return map;
+};
+
+// Per-TCG rarity lookup for the rarity filter: { [tcg_code]: [{code,label,sort_order}] }.
+// Cached 24h in localStorage. Falls back to {} so callers derive distinct
+// rarities from the catalog when a TCG has no rows yet.
+const RARITIES_CACHE_KEY = 'optcg:rarities:v1';
+export const loadRarities = async ({ force = false } = {}) => {
+  if (!force) {
+    try {
+      const raw = localStorage.getItem(RARITIES_CACHE_KEY);
+      if (raw) {
+        const { ts, byTcg } = JSON.parse(raw);
+        if (byTcg && Date.now() - (ts || 0) < CACHE_TTL_MS) return byTcg;
+      }
+    } catch {}
+  }
+  const { data, error } = await catalogClient
+    .from('rarities').select('tcg_code,code,label,sort_order').order('sort_order', { ascending: true });
+  if (error) { console.warn('[catalog] rarities fetch failed', error); return {}; }
+  const byTcg = {};
+  for (const r of (data || [])) {
+    (byTcg[r.tcg_code] ||= []).push({ code: r.code, label: r.label || r.code, sort_order: r.sort_order ?? 0 });
+  }
+  try { localStorage.setItem(RARITIES_CACHE_KEY, JSON.stringify({ ts: Date.now(), byTcg })); } catch {}
+  return byTcg;
+};
+
 const revalidateCatalog = async () => {
   if (catalogPromise) return catalogPromise;
   catalogPromise = (async () => {
-    const rows = await fetchAllCards();
-    const cards = rows.map(normalize).filter(c => c.id && c.displayId);
+    const [rows, tcgNames] = await Promise.all([fetchAllCards(), fetchTcgNames()]);
+    const cards = rows.map((r) => normalize(r, tcgNames)).filter(c => c.id && c.displayId);
     const final = cards.sort(compareCards);
     try {
       localStorage.setItem(CACHE_KEY, JSON.stringify({ ts: Date.now(), cards: final }));
@@ -200,6 +239,7 @@ const revalidateCatalog = async () => {
         id: c.id, canonicalId: c.canonicalId, displayId: c.displayId, variantKey: c.variantKey,
         name: c.name, fullName: c.fullName, cleanName: c.cleanName,
         setId: c.setId, setName: c.setName, setAbbreviation: c.setAbbreviation,
+        tcgCode: c.tcgCode, tcgName: c.tcgName,
         rarity: c.rarity, category: c.category, imageUrl: c.imageUrl,
         tcg_id: 0, attributes: c.attributes, isParallel: c.isParallel, isManga: c.isManga,
         source: c.source,
