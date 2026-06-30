@@ -4,7 +4,7 @@ description: Sweep the codebase for dead code, stale comments, and superseded pa
 
 # /cleanup
 
-You are about to do a directed cleanup sweep of the `optcg-ledger` codebase.
+You are about to do a directed cleanup sweep of the `tcg-ledger` codebase.
 
 ## Goal
 

@@ -28,7 +28,7 @@ Solo mode = localStorage; shared mode = Supabase (friend group on one
 - Vaults: **`50.50tcgpw123`** = real collection; **`my-crew`** = empty test.
 
 ## Local setup on the new machine
-1. `git clone https://github.com/tjscr17/optcg-ledger && cd optcg-ledger && npm install`
+1. `git clone https://github.com/tjscr17/tcg-ledger && cd tcg-ledger && npm install`
 2. `.env.local` is **gitignored** — recreate it (anon key is public/bundle-safe):
    ```
    VITE_SUPABASE_URL=https://ajpxzfhmyzzgarewijnr.supabase.co
